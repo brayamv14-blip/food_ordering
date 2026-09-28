@@ -1,6 +1,9 @@
-import { Models } from "react-native-appwrite";
+import { ImageSourcePropType } from "react-native";
 
-export interface MenuItem extends Models.Document {
+export interface MenuItem {
+    $id: string;
+    $createdAt: string;
+    $updatedAt: string;
     name: string;
     price: number;
     image_url: string;
@@ -8,20 +11,61 @@ export interface MenuItem extends Models.Document {
     calories: number;
     protein: number;
     rating: number;
-    type: string;
+    type?: string;
+    categories?: string;
 }
 
-export interface Category extends Models.Document {
+export interface Category {
+    $id: string;
+    $createdAt: string;
+    $updatedAt: string;
     name: string;
     description: string;
 }
 
-export interface User extends Models.Document {
+export interface User {
+    $id: string;
+    $createdAt: string;
+    $updatedAt: string;
     name: string;
     email: string;
     avatar: string;
+    accountId?: string;
 }
+export interface CartStore {
+    items: CartItemType[];
 
+    addItem: (
+        item: Omit<CartItemType, "quantity">
+    ) => void;
+
+    updateItem: (
+        id: string,
+        oldCustomizations: CartCustomization[],
+        item: Omit<CartItemType, "quantity">
+    ) => void;
+
+    removeItem: (
+        id: string,
+        customizations: CartCustomization[]
+    ) => void;
+
+    increaseQty: (
+        id: string,
+        customizations: CartCustomization[]
+    ) => void;
+
+    decreaseQty: (
+        id: string,
+        customizations: CartCustomization[]
+    ) => void;
+
+    clearCart: () => void;
+
+    getTotalItems: () => number;
+
+    getTotalPrice: () => number;
+}
 export interface CartCustomization {
     id: string;
     name: string;
@@ -30,7 +74,7 @@ export interface CartCustomization {
 }
 
 export interface CartItemType {
-    id: string; // menu item id
+    id: string;
     name: string;
     price: number;
     image_url: string;
@@ -38,31 +82,21 @@ export interface CartItemType {
     customizations?: CartCustomization[];
 }
 
-export interface CartStore {
-    items: CartItemType[];
-    addItem: (item: Omit<CartItemType, "quantity">) => void;
-    removeItem: (id: string, customizations: CartCustomization[]) => void;
-    increaseQty: (id: string, customizations: CartCustomization[]) => void;
-    decreaseQty: (id: string, customizations: CartCustomization[]) => void;
-    clearCart: () => void;
-    getTotalItems: () => number;
-    getTotalPrice: () => number;
-}
-
-interface TabBarIconProps {
+type.d.ts
+export interface TabBarIconProps {
     focused: boolean;
     icon: ImageSourcePropType;
     title: string;
 }
 
-interface PaymentInfoStripeProps {
+export interface PaymentInfoStripeProps {
     label: string;
     value: string;
     labelStyle?: string;
     valueStyle?: string;
 }
 
-interface CustomButtonProps {
+export interface CustomButtonProps {
     onPress?: () => void;
     title?: string;
     style?: string;
@@ -71,37 +105,41 @@ interface CustomButtonProps {
     isLoading?: boolean;
 }
 
-interface CustomHeaderProps {
+export interface CustomHeaderProps {
     title?: string;
 }
 
-interface CustomInputProps {
+export interface CustomInputProps {
     placeholder?: string;
     value?: string;
     onChangeText?: (text: string) => void;
     label: string;
     secureTextEntry?: boolean;
-    keyboardType?: "default" | "email-address" | "numeric" | "phone-pad";
+    keyboardType?:
+        | "default"
+        | "email-address"
+        | "numeric"
+        | "phone-pad";
 }
 
-interface ProfileFieldProps {
+export interface ProfileFieldProps {
     label: string;
     value: string;
     icon: ImageSourcePropType;
 }
 
-interface CreateUserPrams {
+export interface CreateUserParams {
     email: string;
     password: string;
     name: string;
 }
 
-interface SignInParams {
+export interface SignInParams {
     email: string;
     password: string;
 }
 
-interface GetMenuParams {
-    category: string;
-    query: string;
+export interface GetMenuParams {
+    category?: string;
+    query?: string;
 }

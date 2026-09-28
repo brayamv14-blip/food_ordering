@@ -34,17 +34,15 @@ export default Sentry.wrap(function RootLayout() {
   });
 
   useEffect(() => {
-    if(error) throw error;
-    if(fontsLoaded) SplashScreen.hideAsync();
+    if (error) throw error;
+    if (fontsLoaded) SplashScreen.hideAsync();
   }, [fontsLoaded, error]);
 
   useEffect(() => {
-    fetchAuthenticatedUser()
+    fetchAuthenticatedUser();
   }, []);
 
-  if(!fontsLoaded || isLoading) return null;
+  if (!fontsLoaded || isLoading) return null;
 
   return <Stack screenOptions={{ headerShown: false }} />;
 });
-
-Sentry.showFeedbackWidget();

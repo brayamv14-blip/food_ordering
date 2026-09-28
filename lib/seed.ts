@@ -1,17 +1,6 @@
 import { ID } from "react-native-appwrite";
-import { appwriteConfig, databases, storage } from "./appwrite";
+import { appwriteConfig, databases } from "./appwrite";
 import dummyData from "./data";
-
-interface Category {
-    name: string;
-    description: string;
-}
-
-interface Customization {
-    name: string;
-    price: number;
-    type: "topping" | "side" | "size" | "crust" | string; // extend as needed
-}
 
 interface MenuItem {
     name: string;
@@ -22,135 +11,143 @@ interface MenuItem {
     calories: number;
     protein: number;
     category_name: string;
-    customizations: string[]; // list of customization names
+    customizations: string[];
 }
 
 interface DummyData {
-    categories: Category[];
-    customizations: Customization[];
+    categories: {
+        name: string;
+        description: string;
+    }[];
+
+    customizations: {
+        name: string;
+        price: number;
+        type: string;
+    }[];
+
     menu: MenuItem[];
 }
 
-// ensure dummyData has correct shape
 const data = dummyData as DummyData;
 
-async function clearAll(collectionId: string): Promise<void> {
-    const list = await databases.listDocuments(
-        appwriteConfig.databaseId,
-        collectionId
-    );
-
-    await Promise.all(
-        list.documents.map((doc) =>
-            databases.deleteDocument(appwriteConfig.databaseId, collectionId, doc.$id)
-        )
-    );
-}
-
-async function clearStorage(): Promise<void> {
-    const list = await storage.listFiles(appwriteConfig.bucketId);
-
-    await Promise.all(
-        list.files.map((file) =>
-            storage.deleteFile(appwriteConfig.bucketId, file.$id)
-        )
-    );
-}
-
-async function uploadImageToStorage(imageUrl: string) {
-    const response = await fetch(imageUrl);
-    const blob = await response.blob();
-
-    const fileObj = {
-        name: imageUrl.split("/").pop() || `file-${Date.now()}.jpg`,
-        type: blob.type,
-        size: blob.size,
-        uri: imageUrl,
-    };
-
-    const file = await storage.createFile(
-        appwriteConfig.bucketId,
-        ID.unique(),
-        fileObj
-    );
-
-    return storage.getFileViewURL(appwriteConfig.bucketId, file.$id);
-}
-
 async function seed(): Promise<void> {
-    // 1. Clear all
-    await clearAll(appwriteConfig.categoriesCollectionId);
-    await clearAll(appwriteConfig.customizationsCollectionId);
-    await clearAll(appwriteConfig.menuCollectionId);
-    await clearAll(appwriteConfig.menuCustomizationsCollectionId);
-    await clearStorage();
+    console.log("🌱 INICIANDO SEED...");
 
-    // 2. Create Categories
+    // =====================================================
+    // 1. CREAR CATEGORÍAS
+    // =====================================================
+
+    console.log("📂 Creando categorías...");
+
     const categoryMap: Record<string, string> = {};
-    for (const cat of data.categories) {
-        const doc = await databases.createDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.categoriesCollectionId,
-            ID.unique(),
-            cat
-        );
-        categoryMap[cat.name] = doc.$id;
+
+    for (const category of data.categories) {
+        const row = await databases.createRow({
+            databaseId: appwriteConfig.databaseId,
+            tableId: appwriteConfig.categoriesCollectionId,
+            rowId: ID.unique(),
+            data: {
+                name: category.name,
+                description: category.description,
+            },
+        });
+
+        categoryMap[category.name] = row.$id;
+
+        console.log(`✅ Categoría: ${category.name}`);
     }
 
-    // 3. Create Customizations
+    // =====================================================
+    // 2. CREAR CUSTOMIZATIONS
+    // =====================================================
+
+    console.log("🧩 Creando customizations...");
+
     const customizationMap: Record<string, string> = {};
-    for (const cus of data.customizations) {
-        const doc = await databases.createDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.customizationsCollectionId,
-            ID.unique(),
-            {
-                name: cus.name,
-                price: cus.price,
-                type: cus.type,
-            }
-        );
-        customizationMap[cus.name] = doc.$id;
+
+    for (const customization of data.customizations) {
+        const row = await databases.createRow({
+            databaseId: appwriteConfig.databaseId,
+            tableId: appwriteConfig.customizationsCollectionId,
+            rowId: ID.unique(),
+            data: {
+                name: customization.name,
+                price: customization.price,
+                type: customization.type,
+            },
+        });
+
+        customizationMap[customization.name] = row.$id;
+
+        console.log(`✅ Customization: ${customization.name}`);
     }
 
-    // 4. Create Menu Items
-    const menuMap: Record<string, string> = {};
-    for (const item of data.menu) {
-        const uploadedImage = await uploadImageToStorage(item.image_url);
+    // =====================================================
+    // 3. CREAR PRODUCTOS DEL MENÚ
+    // =====================================================
 
-        const doc = await databases.createDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.menuCollectionId,
-            ID.unique(),
-            {
+    console.log("🍔 Creando productos...");
+
+    for (const item of data.menu) {
+        const categoryId = categoryMap[item.category_name];
+
+        if (!categoryId) {
+            console.log(
+                `⚠️ Categoría no encontrada: ${item.category_name}`
+            );
+            continue;
+        }
+
+        const menuRow = await databases.createRow({
+            databaseId: appwriteConfig.databaseId,
+            tableId: appwriteConfig.menuCollectionId,
+            rowId: ID.unique(),
+            data: {
                 name: item.name,
                 description: item.description,
-                image_url: uploadedImage,
+                image_url: item.image_url,
                 price: item.price,
                 rating: item.rating,
                 calories: item.calories,
                 protein: item.protein,
-                categories: categoryMap[item.category_name],
+                categories: categoryId,
+            },
+        });
+
+        console.log(`✅ Producto: ${item.name}`);
+
+        // =================================================
+        // 4. CREAR RELACIONES CON CUSTOMIZATIONS
+        // =================================================
+
+        for (const customizationName of item.customizations) {
+            const customizationId =
+                customizationMap[customizationName];
+
+            if (!customizationId) {
+                console.log(
+                    `⚠️ Customization no encontrada: ${customizationName}`
+                );
+                continue;
             }
-        );
 
-        menuMap[item.name] = doc.$id;
-
-        // 5. Create menu_customizations
-        for (const cusName of item.customizations) {
-            await databases.createDocument(
-                appwriteConfig.databaseId,
-                appwriteConfig.menuCustomizationsCollectionId,
-                ID.unique(),
-                {
-                    menu: doc.$id,
-                    customizations: customizationMap[cusName],
-                }
-            );
+            await databases.createRow({
+                databaseId: appwriteConfig.databaseId,
+                tableId:
+                    appwriteConfig.menuCustomizationsCollectionId,
+                rowId: ID.unique(),
+                data: {
+                    menu: menuRow.$id,
+                    customizations: customizationId,
+                },
+            });
         }
     }
 
-    console.log("✅ Seeding complete.");
+    console.log("================================");
+    console.log("🎉 SEED COMPLETADO");
+    console.log("================================");
 }
 
 export default seed;

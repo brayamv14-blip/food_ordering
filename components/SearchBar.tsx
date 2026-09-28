@@ -1,24 +1,32 @@
-import {images} from "@/constants";
+import { images } from "@/constants";
 import { router, useLocalSearchParams } from "expo-router";
 import React, { useState } from "react";
 import { Image, TextInput, TouchableOpacity, View } from "react-native";
 
 const Searchbar = () => {
-    const params = useLocalSearchParams<{ query: string }>();
-    const [query, setQuery] = useState(params.query);
+    const params = useLocalSearchParams<{ query?: string }>();
+
+    const [query, setQuery] = useState(params.query ?? "");
 
     const handleSearch = (text: string) => {
         setQuery(text);
 
-        if(!text) router.setParams({ query: undefined });
+        if (!text.trim()) {
+            router.setParams({
+                query: ""
+            });
+        }
     };
 
     const handleSubmit = () => {
-        if(query.trim()) router.setParams({ query });
-    }
+        router.setParams({
+            query: query.trim()
+        });
+    };
 
     return (
         <View className="searchbar">
+
             <TextInput
                 className="flex-1 p-5"
                 placeholder="Search for pizzas, burgers..."
@@ -28,9 +36,10 @@ const Searchbar = () => {
                 placeholderTextColor="#A0A0A0"
                 returnKeyType="search"
             />
+
             <TouchableOpacity
                 className="pr-5"
-                onPress={() => router.setParams({ query })}
+                onPress={handleSubmit}
             >
                 <Image
                     source={images.search}
@@ -39,6 +48,7 @@ const Searchbar = () => {
                     tintColor="#5D5F6D"
                 />
             </TouchableOpacity>
+
         </View>
     );
 };

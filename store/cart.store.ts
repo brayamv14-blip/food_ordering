@@ -7,10 +7,17 @@ function areCustomizationsEqual(
 ): boolean {
     if (a.length !== b.length) return false;
 
-    const aSorted = [...a].sort((x, y) => x.id.localeCompare(y.id));
-    const bSorted = [...b].sort((x, y) => x.id.localeCompare(y.id));
+    const aSorted = [...a].sort((x, y) =>
+        x.id.localeCompare(y.id)
+    );
 
-    return aSorted.every((item, idx) => item.id === bSorted[idx].id);
+    const bSorted = [...b].sort((x, y) =>
+        x.id.localeCompare(y.id)
+    );
+
+    return aSorted.every(
+        (item, idx) => item.id === bSorted[idx].id
+    );
 }
 
 export const useCartStore = create<CartStore>((set, get) => ({
@@ -22,74 +29,169 @@ export const useCartStore = create<CartStore>((set, get) => ({
         const existing = get().items.find(
             (i) =>
                 i.id === item.id &&
-                areCustomizationsEqual(i.customizations ?? [], customizations)
+                areCustomizationsEqual(
+                    i.customizations ?? [],
+                    customizations
+                )
         );
 
         if (existing) {
             set({
                 items: get().items.map((i) =>
                     i.id === item.id &&
-                    areCustomizationsEqual(i.customizations ?? [], customizations)
-                        ? { ...i, quantity: i.quantity + 1 }
+                    areCustomizationsEqual(
+                        i.customizations ?? [],
+                        customizations
+                    )
+                        ? {
+                              ...i,
+                              quantity: i.quantity + 1
+                          }
                         : i
-                ),
+                )
             });
         } else {
             set({
-                items: [...get().items, { ...item, quantity: 1, customizations }],
+                items: [
+                    ...get().items,
+                    {
+                        ...item,
+                        quantity: 1,
+                        customizations
+                    }
+                ]
             });
         }
     },
 
-    removeItem: (id, customizations = []) => {
+    updateItem: (
+        id,
+        oldCustomizations,
+        item
+    ) => {
+        const currentItems = get().items;
+
+        const updatedItems = currentItems.map((currentItem) => {
+            const isItemToUpdate =
+                currentItem.id === id &&
+                areCustomizationsEqual(
+                    currentItem.customizations ?? [],
+                    oldCustomizations
+                );
+
+            if (!isItemToUpdate) {
+                return currentItem;
+            }
+
+            return {
+                ...item,
+                quantity: currentItem.quantity,
+                customizations: item.customizations ?? []
+            };
+        });
+
+        set({
+            items: updatedItems
+        });
+    },
+
+    removeItem: (
+        id,
+        customizations = []
+    ) => {
         set({
             items: get().items.filter(
                 (i) =>
                     !(
                         i.id === id &&
-                        areCustomizationsEqual(i.customizations ?? [], customizations)
+                        areCustomizationsEqual(
+                            i.customizations ?? [],
+                            customizations
+                        )
                     )
-            ),
+            )
         });
     },
 
-    increaseQty: (id, customizations = []) => {
+    increaseQty: (
+        id,
+        customizations = []
+    ) => {
         set({
             items: get().items.map((i) =>
                 i.id === id &&
-                areCustomizationsEqual(i.customizations ?? [], customizations)
-                    ? { ...i, quantity: i.quantity + 1 }
+                areCustomizationsEqual(
+                    i.customizations ?? [],
+                    customizations
+                )
+                    ? {
+                          ...i,
+                          quantity: i.quantity + 1
+                      }
                     : i
-            ),
+            )
         });
     },
 
-    decreaseQty: (id, customizations = []) => {
+    decreaseQty: (
+        id,
+        customizations = []
+    ) => {
         set({
             items: get()
-                .items.map((i) =>
+                .items
+                .map((i) =>
                     i.id === id &&
-                    areCustomizationsEqual(i.customizations ?? [], customizations)
-                        ? { ...i, quantity: i.quantity - 1 }
+                    areCustomizationsEqual(
+                        i.customizations ?? [],
+                        customizations
+                    )
+                        ? {
+                              ...i,
+                              quantity: i.quantity - 1
+                          }
                         : i
                 )
-                .filter((i) => i.quantity > 0),
+                .filter(
+                    (i) => i.quantity > 0
+                )
         });
     },
 
-    clearCart: () => set({ items: [] }),
+    clearCart: () =>
+        set({
+            items: []
+        }),
 
     getTotalItems: () =>
-        get().items.reduce((total, item) => total + item.quantity, 0),
+        get().items.reduce(
+            (total, item) =>
+                total + item.quantity,
+            0
+        ),
 
     getTotalPrice: () =>
-        get().items.reduce((total, item) => {
-            const base = item.price;
-            const customPrice =
-                item.customizations?.reduce(
-                    (s: number, c: CartCustomization) => s + c.price,
-                    0
-                ) ?? 0;
-            return total + item.quantity * (base + customPrice);
-        }, 0),
+        get().items.reduce(
+            (total, item) => {
+                const base = item.price;
+
+                const customPrice =
+                    item.customizations?.reduce(
+                        (
+                            sum: number,
+                            customization: CartCustomization
+                        ) =>
+                            sum +
+                            customization.price,
+                        0
+                    ) ?? 0;
+
+                return (
+                    total +
+                    item.quantity *
+                        (base + customPrice)
+                );
+            },
+            0
+        )
 }));
