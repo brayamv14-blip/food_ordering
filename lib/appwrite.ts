@@ -3,6 +3,8 @@ import {
     Account,
     Avatars,
     Client,
+    ExecutionMethod,
+    Functions,
     TablesDB,
     ID,
     Query,
@@ -37,7 +39,16 @@ export const appwriteConfig = {
 
     // Pedidos
     ordersCollectionId: "6ab727bd00217e5c8f8d",
-    orderItemsCollectionId: "6ab7281f0039efe022c2"
+    orderItemsCollectionId: "6ab7281f0039efe022c2",
+
+    // Appwrite Functions (backend de confianza). Los IDs no son secretos.
+    // Si no estan definidos, la app usa el modo directo SOLO PARA DESARROLLO.
+    functions: {
+        createOrder: process.env.EXPO_PUBLIC_FN_CREATE_ORDER ?? "",
+        updateOrderStatus: process.env.EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS ?? "",
+        updateDriverLocation: process.env.EXPO_PUBLIC_FN_UPDATE_DRIVER_LOCATION ?? "",
+        staffApi: process.env.EXPO_PUBLIC_FN_STAFF_API ?? ""
+    }
 };
 
 export const client = new Client();
@@ -67,6 +78,43 @@ export const account = new Account(client);
 export const databases = new TablesDB(client);
 
 export const storage = new Storage(client);
+
+export const functions = new Functions(client);
+
+/**
+ * Ejecuta una Appwrite Function de forma sincrona con cuerpo JSON.
+ * Lanza un Error con el mensaje del backend si responde con codigo >= 400.
+ */
+export const callBackendFunction = async <T = unknown>(
+    functionId: string,
+    payload: Record<string, unknown>
+): Promise<T> => {
+    const execution = await functions.createExecution({
+        functionId,
+        body: JSON.stringify(payload),
+        async: false,
+        xpath: "/",
+        method: ExecutionMethod.POST,
+        headers: { "content-type": "application/json" }
+    });
+
+    let parsed: any = null;
+    try {
+        parsed = execution.responseBody ? JSON.parse(execution.responseBody) : null;
+    } catch {
+        parsed = null;
+    }
+
+    if (execution.responseStatusCode >= 400 || execution.status === "failed") {
+        const error: any = new Error(
+            parsed?.error ?? "El servidor rechazo la operacion"
+        );
+        error.code = parsed?.code ?? execution.responseStatusCode;
+        throw error;
+    }
+
+    return parsed as T;
+};
 
 const avatars = new Avatars(client);
 
@@ -151,6 +199,15 @@ export const signIn = async ({
 
         throw e;
     }
+};
+
+
+// ======================================================
+// CERRAR SESIÓN
+// ======================================================
+
+export const signOut = async () => {
+    await account.deleteSession("current");
 };
 
 
@@ -359,101 +416,20 @@ export const getProductCustomizations = async (
 
 
 // ======================================================
-// CREAR PEDIDO
+// CREAR PEDIDO -> ver lib/services/orders.service.ts (createOrderIdempotent)
 // ======================================================
-
-export const createOrder = async ({
-    userId,
-    total,
-    deliveryFee,
-    discount,
-    paymentMethod,
-    items
-}: {
-    userId: string;
-    total: number;
-    deliveryFee: number;
-    discount: number;
-    paymentMethod: string;
-
-    items: {
-        menuId: string;
-        name: string;
-        price: number;
-        quantity: number;
-        customizations: string;
-    }[];
-}) => {
-    try {
-
-        // Crear pedido principal
-        const order = await databases.createRow({
-            databaseId: appwriteConfig.databaseId,
-
-            tableId:
-                appwriteConfig.ordersCollectionId,
-
-            rowId:
-                ID.unique(),
-
-            data: {
-                userId,
-                status: "pending",
-                total,
-                deliveryFee,
-                discount,
-                paymentMethod
-            }
-        });
-
-        // Crear productos del pedido
-        await Promise.all(
-            items.map((item) =>
-                databases.createRow({
-                    databaseId:
-                        appwriteConfig.databaseId,
-
-                    tableId:
-                        appwriteConfig.orderItemsCollectionId,
-
-                    rowId:
-                        ID.unique(),
-
-                    data: {
-                        orderId: order.$id,
-                        menuId: item.menuId,
-                        name: item.name,
-                        price: item.price,
-                        quantity: item.quantity,
-                        customizations:
-                            item.customizations
-                    }
-                })
-            )
-        );
-
-        return order;
-
-    } catch (error) {
-        console.log(
-            "Error al crear pedido:",
-            error
-        );
-
-        throw error;
-    }
-};
 
 export const getMyOrders = async (userId: string) => {
     try {
         console.log("========== OBTENIENDO MIS PEDIDOS ==========");
-        console.log("User ID:", userId);
 
         const orders = await databases.listRows({
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.ordersCollectionId,
             queries: [
-                Query.equal("userId", userId)
+                Query.equal("userId", userId),
+                Query.orderDesc("$createdAt"),
+                Query.limit(50)
             ]
         });
 
@@ -480,11 +456,6 @@ export const getMyOrders = async (userId: string) => {
             })
         );
 
-        console.log(
-            "Pedidos con productos:",
-            ordersWithItems
-        );
-
         return ordersWithItems;
     } catch (error) {
         console.log(
@@ -495,29 +466,35 @@ export const getMyOrders = async (userId: string) => {
         throw error;
     }
 };
+/**
+ * Cancela un pedido propio. Con backend configurado la regla "solo si esta
+ * pendiente" se valida en el servidor; sin el, se hace una verificacion previa
+ * en el cliente (SOLO DESARROLLO: no es una barrera de seguridad).
+ */
 export const cancelOrder = async (orderId: string) => {
-    try {
-        console.log("========== CANCELANDO PEDIDO ==========");
-        console.log("Order ID:", orderId);
-
-        const order = await databases.updateRow({
-            databaseId: appwriteConfig.databaseId,
-            tableId: appwriteConfig.ordersCollectionId,
-            rowId: orderId,
-            data: {
-                status: "cancelled"
-            }
+    if (appwriteConfig.functions.updateOrderStatus) {
+        return callBackendFunction(appwriteConfig.functions.updateOrderStatus, {
+            orderId,
+            status: "cancelled"
         });
-
-        console.log("PEDIDO CANCELADO:");
-        console.log(order);
-
-        return order;
-    } catch (error) {
-        console.log("========== ERROR CANCELANDO PEDIDO ==========");
-        console.log(error);
-        throw error;
     }
+
+    const current = await databases.getRow({
+        databaseId: appwriteConfig.databaseId,
+        tableId: appwriteConfig.ordersCollectionId,
+        rowId: orderId
+    });
+
+    if (current.status !== "pending") {
+        throw new Error("Este pedido ya no se puede cancelar.");
+    }
+
+    return databases.updateRow({
+        databaseId: appwriteConfig.databaseId,
+        tableId: appwriteConfig.ordersCollectionId,
+        rowId: orderId,
+        data: { status: "cancelled" }
+    });
 };
 export const updateUserProfile = async ({
     userId,

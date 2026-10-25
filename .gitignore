@@ -40,3 +40,9 @@ app-example
 
 .env.local
 .env 
+
+# local env (variantes)
+.env.*
+!.env.example
+*.keystore
+android/app/google-services.json

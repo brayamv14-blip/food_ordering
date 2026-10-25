@@ -14,7 +14,8 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
-      }
+      },
+      "package": "com.jsm.foodordering"
     },
     "web": {
       "bundler": "metro",
@@ -38,6 +39,21 @@
           "url": "https://sentry.io/",
           "project": "jsm_reactnative_food-ordering",
           "organization": "jsmpro"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationWhenInUsePermission": "La app usa tu ubicación para guardar tus direcciones y, en modo repartidor de prueba, compartir la posición del pedido."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "La app accede a tus fotos solo para que elijas tu foto de perfil.",
+          "cameraPermission": false,
+          "microphonePermission": false
         }
       ]
     ],
