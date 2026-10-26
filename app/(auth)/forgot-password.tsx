@@ -42,7 +42,7 @@ const ForgotPassword = () => {
         Alert.alert(
             "Revisa tu correo",
             "Si existe una cuenta con ese correo, te enviamos un enlace para cambiar tu contraseña. El enlace vence en 1 hora.",
-            [{ text: "Ya tengo el enlace", onPress: () => router.push("/reset-password") }, { text: "Cerrar" }]
+            [{ text: "Ya tengo el enlace", onPress: () => router.push("/reset-password" as never) }, { text: "Cerrar" }]
         );
 
     return (

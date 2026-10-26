@@ -83,7 +83,7 @@ const ResetPassword = () => {
             <CustomButton title="Cambiar contraseña" isLoading={isSubmitting} onPress={submit} />
 
             <View className="flex justify-center mt-2 flex-row gap-2">
-                <Link href="/forgot-password" className="base-bold text-primary">
+                <Link href={"/forgot-password" as never} className="base-bold text-primary">
                     Solicitar otro enlace
                 </Link>
             </View>

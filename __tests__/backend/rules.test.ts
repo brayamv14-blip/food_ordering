@@ -69,10 +69,12 @@ describe("reglas del backend (Appwrite Functions)", () => {
 
     it("las copias de rules.js dentro de cada función están sincronizadas", () => {
         const root = path.join(__dirname, "../../appwrite-functions");
-        const shared = fs.readFileSync(path.join(root, "shared/rules.js"), "utf8");
+        // Se normaliza CRLF -> LF para que la prueba funcione igual en Windows y Linux.
+        const lf = (txt: string) => txt.replace(/\r\n/g, "\n");
+        const shared = lf(fs.readFileSync(path.join(root, "shared/rules.js"), "utf8"));
         const expected = shared.replace(/module\.exports = \{([\s\S]*?)\};\s*$/, "export {$1};\n");
         for (const fn of ["create-order", "update-order-status"]) {
-            const copy = fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8");
+            const copy = lf(fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8"));
             expect(copy.endsWith(expected)).toBe(true);
         }
     });

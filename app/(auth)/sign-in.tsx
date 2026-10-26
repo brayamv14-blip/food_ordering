@@ -85,7 +85,7 @@ const SignIn = () => {
             />
 
             <View className="flex justify-center mt-4 flex-row">
-                <Link href="/forgot-password" className="base-bold text-primary">
+                <Link href={"/forgot-password" as never} className="base-bold text-primary">
                     ¿Olvidaste tu contraseña?
                 </Link>
             </View>
