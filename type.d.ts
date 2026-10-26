@@ -134,6 +134,8 @@ export interface CreateUserParams {
     email: string;
     password: string;
     name: string;
+    phone: string;
+phone?: string | null;
 }
 
 export interface SignInParams {

@@ -19,6 +19,8 @@ jest.mock("@/lib/services/orders.service", () => {
 const mockUnavailable = jest.fn();
 jest.mock("@/lib/services/catalog.service", () => ({ findUnavailableItems: (...a: any[]) => mockUnavailable(...a) }));
 
+jest.mock("@/components/AddressPicker", () => ({ __esModule: true, default: () => null }));
+
 import Checkout from "@/app/checkout";
 import { useCartStore } from "@/store/cart.store";
 

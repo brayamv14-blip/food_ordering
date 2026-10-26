@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { getCurrentUser } from "@/lib/appwrite";
 import { ProfileInput, validateProfile } from "@/lib/domain/address";
+import AddressPicker from "@/components/AddressPicker";
 import { getCurrentPosition } from "@/lib/services/location";
 import { changeAvatar } from "@/lib/services/avatar.service";
 import {
@@ -146,6 +147,21 @@ const EditProfile = () => {
         </View>
     );
 
+    const pickRow = (which: "home" | "work") => (
+        <View className="mb-4">
+            <AddressPicker
+                onSelect={(p) => {
+                    setForm((f) => ({ ...f, [which === "home" ? "homeAddress" : "workAddress"]: p.line }));
+                    setCoords((c) =>
+                        which === "home"
+                            ? { ...c, homeLatitude: p.latitude, homeLongitude: p.longitude }
+                            : { ...c, workLatitude: p.latitude, workLongitude: p.longitude }
+                    );
+                }}
+            />
+        </View>
+    );
+
     const pinRow = (which: "home" | "work") => {
         const has = which === "home" ? coords.homeLatitude !== null : coords.workLatitude !== null;
         return (
@@ -191,8 +207,10 @@ const EditProfile = () => {
 
                 {input("Teléfono", "phone", { keyboardType: "phone-pad", placeholder: "10 dígitos" })}
                 {input("Dirección de casa", "homeAddress", { multiline: true, placeholder: "Calle, número, colonia, municipio" })}
+                {pickRow("home")}
                 {pinRow("home")}
                 {input("Dirección de trabajo (opcional)", "workAddress", { multiline: true, placeholder: "Calle, número, colonia, municipio" })}
+                {pickRow("work")}
                 {pinRow("work")}
 
                 <Text className="mb-2 text-sm font-semibold text-dark-100">Dirección preferida para tus pedidos</Text>

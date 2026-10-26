@@ -1,8 +1,9 @@
-import { Client, ID, Query, TablesDB, Users } from 'node-appwrite';
+import { Client, ID, Messaging, Query, TablesDB, Users } from 'node-appwrite';
 import {
-    ACTIVE_DELIVERY, buildAssignmentNotification, buildOrderEvent, buildStatusNotification, canActorTransition,
-    canAssignDriver, checkExpected, isExpoPushToken, latestPaymentStatus, matchesOrderQuery, parseDateRange,
-    pickApprovedPayment, toStaffOrderView, tokensToPurge, validateDriverPosition
+    ACTIVE_DELIVERY, buildAssignmentNotification, buildCheckoutSessionParams, buildOrderEvent, buildPaymentNotification,
+    buildPushRequest, buildStatusNotification, canActorTransition, canAssignDriver, checkExpected, checkSessionPayment,
+    isStripeCheckoutUrl, matchesOrderQuery, movePaymentStatus, parseDateRange, paymentIntentId, stripeRequest,
+    toStaffOrderView, validateDriverPosition
 } from './rules.js';
 
 /**
@@ -10,7 +11,8 @@ import {
  * `create-order`). Contrato por el campo `action` del cuerpo JSON:
  *
  *   updateStatus   (por omision)  cliente: cancelar propio pendiente | staff | driver asignado
- *   syncPayment                   dueno o staff: verifica el pago en linea (Mercado Pago)
+ *   syncPayment                   dueno o staff: verifica el pago en linea con Stripe (en el servidor)
+ *   payOrder                      dueno: devuelve el enlace de Stripe Checkout para pagar (o reintentar) su pedido
  *   updateLocation                driver asignado, pedido en camino
  *   myDeliveries                  driver: sus entregas activas
  *   listOrders / listDrivers / assignDriver / orderHistory    solo staff
@@ -22,9 +24,8 @@ const DB = process.env.DATABASE_ID;
 const ORDERS = process.env.ORDERS_TABLE_ID;
 const ITEMS = process.env.ORDER_ITEMS_TABLE_ID;
 const EVENTS = process.env.ORDER_EVENTS_TABLE_ID; // opcional
-const USERS_TABLE = process.env.USERS_TABLE_ID; // opcional: necesario para enviar notificaciones push
-const EXPO_ACCESS_TOKEN = process.env.EXPO_ACCESS_TOKEN; // opcional (seguridad extra del servicio push de Expo)
-const MP_TOKEN = process.env.MP_ACCESS_TOKEN; // necesario solo para syncPayment
+const STRIPE_KEY = process.env.STRIPE_SECRET_KEY; // solo en la Function; necesario para pagos y reembolsos
+const PAYMENT_RETURN_URL = process.env.PAYMENT_RETURN_URL; // https de recovery-bridge/payment-return.html
 const STATUSES = ['pending', 'confirmed', 'preparing', 'on_the_way', 'delivered', 'cancelled'];
 
 const fail = (res, status, code, error) => res.json({ code, error }, status);
@@ -39,6 +40,7 @@ export default async ({ req, res, log, error }) => {
         .setKey(req.headers['x-appwrite-key']);
     const db = new TablesDB(client);
     const users = new Users(client);
+    const messaging = new Messaging(client);
 
     let body;
     try {
@@ -58,31 +60,38 @@ export default async ({ req, res, log, error }) => {
         }
     };
 
-    // Notificaciones push (Expo Push Service). Mejor esfuerzo: nunca bloquea ni hace fallar la operacion.
+    // Notificaciones push (Appwrite Messaging + FCM). Mejor esfuerzo: nunca bloquea ni hace fallar la operacion.
+    // El destinatario lo decide siempre el servidor (dueno del pedido o repartidor asignado).
     const notify = async (accountId, message) => {
-        if (!USERS_TABLE || !message || !accountId) return;
+        const req = buildPushRequest(accountId, message);
+        if (!req) return;
         try {
-            const rows = (await db.listRows({ databaseId: DB, tableId: USERS_TABLE, queries: [Query.equal('accountId', accountId), Query.limit(1)] })).rows;
-            const profile = rows[0];
-            const token = profile && profile.pushToken;
-            if (!isExpoPushToken(token)) return;
-            const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
-            if (EXPO_ACCESS_TOKEN) headers.Authorization = `Bearer ${EXPO_ACCESS_TOKEN}`;
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 8000);
-            try {
-                const resp = await fetch('https://exp.host/--/api/v2/push/send', { method: 'POST', headers, body: JSON.stringify([{ to: token, ...message }]), signal: ctrl.signal });
-                const json = await resp.json().catch(() => null);
-                // Dispositivo dado de baja: se borra el token para no insistir.
-                if (tokensToPurge(json, [token]).length > 0) {
-                    await db.updateRow({ databaseId: DB, tableId: USERS_TABLE, rowId: profile.$id, data: { pushToken: null } });
-                }
-            } finally {
-                clearTimeout(timer);
-            }
+            await messaging.createPush({ messageId: ID.unique(), ...req });
         } catch (e) {
             error(`push_failed: ${e.message}`);
         }
+    };
+
+    const stripe = (opts) => stripeRequest({ secret: STRIPE_KEY, ...opts });
+
+    /** Consulta la sesion de Stripe del pedido (con su PaymentIntent). */
+    const getSession = async (order) => {
+        if (!order.stripeSessionId) return null;
+        const r = await stripe({ method: 'GET', path: `/v1/checkout/sessions/${encodeURIComponent(order.stripeSessionId)}` });
+        return r.ok ? r.data : null;
+    };
+
+    /** Marca el pago como pagado (idempotente). Devuelve true solo si hubo cambio real. */
+    const markPaid = async (order, session, actor) => {
+        const move = movePaymentStatus(order.paymentStatus || 'pending', 'paid');
+        if (!move.ok || !move.changed) return false;
+        const data = { paymentStatus: 'paid' };
+        const pi = paymentIntentId(session);
+        if (pi) data.paymentId = pi.slice(0, 64);
+        await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data });
+        await record({ orderId: order.$id, type: 'payment_paid', from: order.status, to: order.status, actorId: actor.id, actorRole: actor.role });
+        await notify(order.userId, buildPaymentNotification('paid', order.$id));
+        return true;
     };
 
     const itemsFor = async (orders) => {
@@ -126,6 +135,29 @@ export default async ({ req, res, log, error }) => {
                 if (!verdict.ok) return fail(res, verdict.code === 'forbidden' ? 403 : 409, verdict.code, verdict.error);
 
                 const data = { status: to };
+                const online = order.paymentMethod === 'online';
+                let refunded = false;
+                if (to === 'cancelled' && online) {
+                    if (order.paymentStatus === 'paid') {
+                        // Pedido pagado: PRIMERO se reembolsa (una sola vez, clave idempotente) y despues se cancela.
+                        if (!STRIPE_KEY) return fail(res, 503, 'payment_unavailable', 'El reembolso no está configurado.');
+                        const session = await getSession(order);
+                        const pi = paymentIntentId(session);
+                        if (!pi) return fail(res, 502, 'refund_failed', 'No se pudo localizar el cobro para reembolsarlo.');
+                        const refund = await stripe({ path: '/v1/refunds', params: [['payment_intent', pi], ['metadata[orderId]', orderId]], idempotencyKey: `refund-${orderId}` });
+                        if (!refund.ok || !refund.data || !['succeeded', 'pending'].includes(refund.data.status)) {
+                            return fail(res, 502, 'refund_failed', 'No se pudo emitir el reembolso. El pedido no se canceló; inténtalo de nuevo.');
+                        }
+                        data.paymentStatus = 'refunded';
+                        refunded = true;
+                    } else if (['pending', 'failed'].includes(order.paymentStatus || 'pending')) {
+                        // Sin cobro: se cierra la sesion de Stripe para que nadie pague un pedido cancelado.
+                        if (STRIPE_KEY && order.stripeSessionId) {
+                            await stripe({ path: `/v1/checkout/sessions/${encodeURIComponent(order.stripeSessionId)}/expire`, idempotencyKey: `expire-${orderId}` });
+                        }
+                        data.paymentStatus = 'cancelled';
+                    }
+                }
                 // Al terminar el pedido no se conserva la ubicacion del repartidor.
                 if (to === 'delivered' || to === 'cancelled') {
                     data.driverLatitude = null;
@@ -134,7 +166,9 @@ export default async ({ req, res, log, error }) => {
                 const updated = await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data });
                 await record({ orderId, type: 'status', from: order.status, to, actorId: userId, actorRole: actor, driverUserId: order.driverUserId ?? null });
                 // Al cliente se le avisa de los cambios hechos por el restaurante o el repartidor (no de los suyos).
+                if (refunded) await record({ orderId, type: 'payment_refunded', from: order.status, to, actorId: userId, actorRole: actor });
                 if (actor !== 'customer') await notify(order.userId, buildStatusNotification(to, orderId));
+                if (refunded) await notify(order.userId, buildPaymentNotification('refunded', orderId));
                 return res.json({ orderId: updated.$id, status: updated.status, updatedAt: updated.$updatedAt ?? null });
             }
 
@@ -146,29 +180,59 @@ export default async ({ req, res, log, error }) => {
                 if (actor === 'customer' && order.userId !== userId) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
                 if (actor === 'driver') return fail(res, 403, 'forbidden', 'No tienes permiso para esta acción.');
                 if (order.paymentMethod !== 'online') return fail(res, 409, 'not_online', 'Este pedido no tiene pago en línea.');
-                if (order.paymentStatus === 'paid') return res.json({ paymentStatus: 'paid', orderId });
-                if (!MP_TOKEN) return fail(res, 503, 'payment_unavailable', 'La verificación de pagos no está configurada.');
+                if (['paid', 'refunded'].includes(order.paymentStatus)) return res.json({ paymentStatus: order.paymentStatus, providerStatus: order.paymentStatus === 'paid' ? 'paid' : 'refunded', orderId });
+                if (!STRIPE_KEY) return fail(res, 503, 'payment_unavailable', 'La verificación de pagos no está configurada.');
+                if (!order.stripeSessionId) return res.json({ paymentStatus: order.paymentStatus || 'pending', providerStatus: null, orderId });
 
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), 10000);
-                let results;
-                try {
-                    const resp = await fetch(`https://api.mercadopago.com/v1/payments/search?external_reference=${encodeURIComponent(orderId)}&sort=date_created&criteria=desc`, {
-                        headers: { Authorization: `Bearer ${MP_TOKEN}` }, signal: ctrl.signal
-                    });
-                    if (!resp.ok) return fail(res, 502, 'payment_unavailable', 'No se pudo consultar el pago. Inténtalo de nuevo.');
-                    results = (await resp.json())?.results;
-                } catch {
-                    return fail(res, 502, 'payment_unavailable', 'No se pudo consultar el pago. Inténtalo de nuevo.');
-                } finally {
-                    clearTimeout(timer);
+                const session = await getSession(order);
+                if (!session) return fail(res, 502, 'payment_unavailable', 'No se pudo consultar el pago. Inténtalo de nuevo.');
+                // Solo cuenta un pago confirmado por Stripe con el importe EXACTO calculado en el servidor.
+                const verdict = checkSessionPayment(session, { orderId, total: order.total });
+                if (verdict.state === 'paid') {
+                    await markPaid(order, session, { id: userId, role: actor });
+                    return res.json({ paymentStatus: 'paid', providerStatus: 'paid', orderId });
                 }
-                // Solo cuenta un pago aprobado por el importe EXACTO del pedido, calculado en el servidor.
-                const approved = pickApprovedPayment(results, { total: order.total });
-                if (!approved) return res.json({ paymentStatus: order.paymentStatus || 'pending', providerStatus: latestPaymentStatus(results), orderId });
-                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data: { paymentStatus: 'paid', paymentId: String(approved.id).slice(0, 64) } });
-                await record({ orderId, type: 'payment_paid', from: order.status, to: order.status, actorId: userId, actorRole: actor });
-                return res.json({ paymentStatus: 'paid', orderId });
+                if (verdict.state === 'invalid') error(`payment_invalid order=${orderId} reason=${verdict.reason}`);
+                return res.json({ paymentStatus: order.paymentStatus || 'pending', providerStatus: verdict.state, orderId });
+            }
+
+            case 'payOrder': {
+                const { orderId } = body;
+                if (typeof orderId !== 'string') return fail(res, 400, 'bad_request', 'Falta el pedido.');
+                const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (order.userId !== userId) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+                if (order.paymentMethod !== 'online') return fail(res, 409, 'not_online', 'Este pedido no tiene pago en línea.');
+                if (order.paymentStatus === 'paid') return res.json({ paymentStatus: 'paid', orderId });
+                if (order.status === 'cancelled' || !['pending', 'failed'].includes(order.paymentStatus || 'pending')) {
+                    return fail(res, 409, 'not_payable', 'Este pedido ya no se puede pagar.');
+                }
+                if (!STRIPE_KEY || !PAYMENT_RETURN_URL) return fail(res, 503, 'payment_unavailable', 'El pago en línea no está disponible por el momento.');
+
+                const existing = await getSession(order);
+                // Si ya habia sesion pero Stripe no respondio, no se crea otra a ciegas: se reintenta despues.
+                if (order.stripeSessionId && !existing) return fail(res, 502, 'payment_unavailable', 'No se pudo consultar el pago. Inténtalo de nuevo.');
+                if (existing) {
+                    const verdict = checkSessionPayment(existing, { orderId, total: order.total });
+                    if (verdict.state === 'paid') {
+                        await markPaid(order, existing, { id: userId, role: actor });
+                        return res.json({ paymentStatus: 'paid', orderId });
+                    }
+                    // Sesion todavia abierta: se reutiliza (no se crea otro cobro).
+                    if (existing.status === 'open' && isStripeCheckoutUrl(existing.url)) return res.json({ checkoutUrl: existing.url, orderId });
+                }
+                // Sin sesion o ya vencida: se crea una nueva, ligada a la anterior para que repetir la llamada no duplique.
+                const key = existing ? `checkout-${orderId}-after-${order.stripeSessionId}` : `checkout-${orderId}-1`;
+                const created = await stripe({
+                    path: '/v1/checkout/sessions',
+                    params: buildCheckoutSessionParams({ orderId, userId: order.userId, total: order.total, returnUrl: PAYMENT_RETURN_URL }),
+                    idempotencyKey: key.slice(0, 255)
+                });
+                const s = created.data;
+                if (!created.ok || !s || typeof s.id !== 'string' || !isStripeCheckoutUrl(s.url)) {
+                    return fail(res, 502, 'payment_unavailable', 'No se pudo iniciar el pago en línea. Inténtalo de nuevo.');
+                }
+                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data: { stripeSessionId: s.id } });
+                return res.json({ checkoutUrl: s.url, orderId });
             }
 
             case 'updateLocation': {

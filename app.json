@@ -11,6 +11,8 @@
       "supportsTablet": true
     },
     "android": {
+        "googleServicesFile": "./google-services.json",
+
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -66,12 +68,19 @@
       [
         "expo-notifications",
         {
-          "color": "#FE8C00"
+          "color": "#FE8C00",
+          "defaultChannel": "orders"
         }
       ]
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "735570df-886c-412f-95a2-2d28a9d67eca"
+      }
     }
   }
 }

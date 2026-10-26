@@ -1,5 +1,5 @@
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
@@ -19,7 +19,7 @@ import {
 } from "@/lib/appwrite";
 import useAuthStore from "@/store/auth.store";
 import { Roles, getMyRoles } from "@/lib/services/roles";
-import { registerForPush, unregisterPush } from "@/lib/services/notifications.service";
+import { isPushRegistered, registerForPush, unregisterPush } from "@/lib/services/notifications.service";
 
 const Profile = () => {
     const [user, setUser] = useState<any>(null);
@@ -57,24 +57,35 @@ const Profile = () => {
         }, [])
     );
 
-    const pushOn = !!user?.pushToken;
+    const [pushOn, setPushOn] = useState(false);
+    useEffect(() => {
+        let alive = true;
+        isPushRegistered().then((v) => alive && setPushOn(v));
+        return () => {
+            alive = false;
+        };
+    }, [user?.$id]);
 
     const togglePush = async (enable: boolean) => {
         if (!user || pushBusy) return;
         setPushBusy(true);
         try {
             if (!enable) {
-                await unregisterPush(user.$id);
-                setUser({ ...user, pushToken: null });
+                if (await unregisterPush()) setPushOn(false);
+                else Alert.alert("Notificaciones", "No pudimos desactivarlas ahora. Revisa tu conexión e inténtalo de nuevo.");
                 return;
             }
-            const r = await registerForPush(user.$id);
+            const r = await registerForPush();
             if (r.status === "registered") {
-                setUser({ ...user, pushToken: r.token });
+                setPushOn(true);
             } else if (r.status === "denied") {
                 Alert.alert("Notificaciones", "Para avisarte de tus pedidos necesitamos el permiso de notificaciones. Puedes activarlo en los ajustes del teléfono.");
             } else if (r.status === "not_configured") {
-                Alert.alert("Notificaciones", "Falta configurar el proyecto de notificaciones (EAS). Consulta PATCH-LEEME.md.");
+                Alert.alert("Notificaciones", "Falta configurar el proveedor de notificaciones (EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID). Consulta docs/NOTIFICACIONES.md.");
+            } else if (r.status === "unsupported") {
+                Alert.alert("Notificaciones", "Las notificaciones push están disponibles en Android.");
+            } else if (r.status === "offline") {
+                Alert.alert("Notificaciones", "Sin conexión. Inténtalo de nuevo cuando tengas internet.");
             } else {
                 Alert.alert("Notificaciones", "No se pudieron activar en este dispositivo. Inténtalo de nuevo más tarde.");
             }
@@ -430,7 +441,7 @@ const Profile = () => {
                                     onPress: async () => {
                                         try {
                                             // Este dispositivo deja de recibir avisos de la cuenta que se cierra.
-                                            if (user?.pushToken) await unregisterPush(user.$id);
+                                            if (pushOn) await unregisterPush();
                                             await signOut();
                                         } catch (e) {
                                             console.log("Error al cerrar sesión:", e);

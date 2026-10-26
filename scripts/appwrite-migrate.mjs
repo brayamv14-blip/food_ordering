@@ -89,8 +89,10 @@ export const PLAN = {
 
             // Estado del pago verificado únicamente por el servidor.
             str('paymentStatus', 20),
+            // PaymentIntent de Stripe (pi_...) una vez pagado.
             str('paymentId', 64),
-            str('paymentUrl', 500)
+            // Sesión de Stripe Checkout (cs_test_... / cs_live_..., puede superar 64 caracteres). La URL de pago NO se guarda.
+            str('stripeSessionId', 128)
         ],
 
         indexes: [

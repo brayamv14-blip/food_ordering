@@ -61,10 +61,10 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(rules.TRANSITIONS).toEqual(JSON.parse(JSON.stringify(ALLOWED_TRANSITIONS)));
     });
 
-    it("solo existen las dos funciones permitidas", () => {
+    it("solo existen las tres funciones permitidas (pedidos, estados y webhook de Stripe)", () => {
         const root = path.join(__dirname, "../../appwrite-functions");
         const dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, "src/main.js"))).map((d) => d.name).sort();
-        expect(dirs).toEqual(["create-order", "update-order-status"]);
+        expect(dirs).toEqual(["create-order", "stripe-webhook", "update-order-status"]);
     });
 
     it("las copias de rules.js dentro de cada función están sincronizadas", () => {
@@ -73,7 +73,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
         const lf = (txt: string) => txt.replace(/\r\n/g, "\n");
         const shared = lf(fs.readFileSync(path.join(root, "shared/rules.js"), "utf8"));
         const expected = shared.replace(/module\.exports = \{([\s\S]*?)\};\s*$/, "export {$1};\n");
-        for (const fn of ["create-order", "update-order-status"]) {
+        for (const fn of ["create-order", "update-order-status", "stripe-webhook"]) {
             const copy = lf(fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8"));
             expect(copy.endsWith(expected)).toBe(true);
         }
@@ -179,44 +179,86 @@ describe("reglas del backend (Appwrite Functions)", () => {
             expect(rules.canActorTransition({ actor: "customer", ...base, to: "cancelled", payment: { method: "online", status: "pending" } }).ok).toBe(true);
             expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "cancelled", payment: { method: "online", status: "paid" } }).ok).toBe(true);
         });
-        it("arma la preferencia con el total del servidor", () => {
-            const b = rules.buildPreferenceBody({ orderId: "abc123456789", total: 28.5, returnUrl: "https://x.io/p.html" });
-            expect(b).toMatchObject({ external_reference: "abc123456789", auto_return: "approved", back_urls: { success: "https://x.io/p.html" } });
-            expect(b.items).toEqual([{ id: "abc123456789", title: "Pedido Delivery #456789", quantity: 1, unit_price: 28.5, currency_id: "MXN" }]);
+        it("arma la sesión de Stripe Checkout con el total del servidor (centavos, MXN)", () => {
+            const params = Object.fromEntries(rules.buildCheckoutSessionParams({ orderId: "abc123456789", userId: "u1", total: 28.5, returnUrl: "https://x.io/p.html" }));
+            expect(params).toMatchObject({
+                mode: "payment",
+                client_reference_id: "abc123456789",
+                "line_items[0][price_data][currency]": "mxn",
+                "line_items[0][price_data][unit_amount]": "2850",
+                "line_items[0][quantity]": "1",
+                "metadata[orderId]": "abc123456789",
+                success_url: "https://x.io/p.html?result=success&order=abc123456789",
+                cancel_url: "https://x.io/p.html?result=cancelled&order=abc123456789"
+            });
+            expect(Number(params.expires_at)).toBeGreaterThan(Date.now() / 1000);
+            expect(rules.formEncode([["a b", "c&d"]])).toBe("a%20b=c%26d");
         });
-        it("solo acepta un pago aprobado con importe y moneda exactos", () => {
-            const pay = (o: any) => ({ id: 1, status: "approved", transaction_amount: 28.5, currency_id: "MXN", ...o });
-            expect(rules.pickApprovedPayment([pay({})], { total: 28.5 })).toMatchObject({ id: 1 });
-            expect(rules.pickApprovedPayment([pay({ transaction_amount: 28.49 })], { total: 28.5 })).toBeNull();
-            expect(rules.pickApprovedPayment([pay({ status: "pending" }), pay({ status: "rejected" })], { total: 28.5 })).toBeNull();
-            expect(rules.pickApprovedPayment([pay({ currency_id: "USD" })], { total: 28.5 })).toBeNull();
-            expect(rules.pickApprovedPayment([pay({ transaction_amount: 0.1 + 0.2 })], { total: 0.3 })).not.toBeNull(); // sin error de flotantes
-            expect(rules.pickApprovedPayment(undefined, { total: 1 })).toBeNull();
-            expect(rules.pickApprovedPayment([null, 5], { total: 1 })).toBeNull();
-            expect(rules.latestPaymentStatus([{ status: "rejected", date_created: "2026-01-01" }, { status: "pending", date_created: "2026-02-01" }])).toBe("pending");
-            expect(rules.latestPaymentStatus([])).toBeNull();
+        it("solo acepta una sesión pagada con pedido, importe y moneda exactos", () => {
+            const sess = (o: any = {}) => ({ id: "cs_1", status: "complete", payment_status: "paid", currency: "mxn", amount_total: 2850, client_reference_id: "o1", metadata: { orderId: "o1" }, ...o });
+            const ord = { orderId: "o1", total: 28.5 };
+            expect(rules.checkSessionPayment(sess(), ord)).toMatchObject({ state: "paid" });
+            expect(rules.checkSessionPayment(sess({ amount_total: 2849 }), ord).state).not.toBe("paid");
+            expect(rules.checkSessionPayment(sess({ currency: "usd" }), ord).state).not.toBe("paid");
+            expect(rules.checkSessionPayment(sess({ payment_status: "unpaid" }), ord).state).not.toBe("paid");
+            expect(rules.checkSessionPayment(sess({ status: "open" }), ord).state).not.toBe("paid");
+            expect(rules.checkSessionPayment(sess({ client_reference_id: "otro", metadata: { orderId: "otro" } }), ord).state).not.toBe("paid");
+            expect(rules.checkSessionPayment(sess({ amount_total: 1 + 0.1 * 3 }), { orderId: "o1", total: 0.013 }).state).not.toBe("paid");
+            expect(rules.checkSessionPayment(null, ord).state).not.toBe("paid");
+        });
+        it("máquina de estados del pago: sin retrocesos y sin reembolso doble", () => {
+            expect(rules.movePaymentStatus("pending", "paid")).toMatchObject({ ok: true, changed: true });
+            expect(rules.movePaymentStatus("failed", "paid")).toMatchObject({ ok: true, changed: true });
+            expect(rules.movePaymentStatus("paid", "paid")).toMatchObject({ ok: true, changed: false });
+            expect(rules.movePaymentStatus("paid", "refunded")).toMatchObject({ ok: true, changed: true });
+            expect(rules.movePaymentStatus("refunded", "refunded")).toMatchObject({ ok: true, changed: false });
+            expect(rules.movePaymentStatus("refunded", "paid").ok).toBe(false);
+            expect(rules.movePaymentStatus("paid", "pending").ok).toBe(false);
+            expect(rules.movePaymentStatus("not_required", "paid").ok).toBe(false);
+        });
+        it("firma del webhook de Stripe: formato, antigüedad y enlace de pago", () => {
+            const hex = "a".repeat(64);
+            expect(rules.parseStripeSignatureHeader(`t=1700000000,v1=${hex}`)).toEqual({ timestamp: 1700000000, signatures: [hex] });
+            for (const bad of ["", "t=1", `v1=${hex}`, "t=x,v1=zz", null, undefined, 5]) expect(rules.parseStripeSignatureHeader(bad)).toBeNull();
+            const now = Date.now();
+            expect(rules.isFreshTimestamp(Math.floor(now / 1000), now)).toBe(true);
+            expect(rules.isFreshTimestamp(Math.floor(now / 1000) - 3600, now)).toBe(false);
+            expect(rules.signedPayload(5, "{}")).toBe("5.{}");
+            expect(rules.isStripeCheckoutUrl("https://checkout.stripe.com/c/pay/cs_test_1#abc")).toBe(true);
+            for (const bad of ["http://checkout.stripe.com/x", "https://checkout.stripe.com.evil.io/x", "https://evil.io/checkout.stripe.com", "", null]) expect(rules.isStripeCheckoutUrl(bad)).toBe(false);
+        });
+        it("traduce eventos de Stripe a cambios de pago", () => {
+            const ev = (type: string, object: any) => ({ id: "evt_1", type, data: { object } });
+            expect(rules.stripeEventToPayment(ev("checkout.session.completed", { payment_status: "paid", client_reference_id: "o1" }))).toMatchObject({ kind: "paid", orderId: "o1" });
+            expect(rules.stripeEventToPayment(ev("checkout.session.completed", { payment_status: "unpaid", client_reference_id: "o1" }))).toBeNull();
+            expect(rules.stripeEventToPayment(ev("checkout.session.async_payment_failed", { client_reference_id: "o1" }))).toMatchObject({ kind: "failed" });
+            expect(rules.stripeEventToPayment(ev("checkout.session.expired", { client_reference_id: "o1" }))).toMatchObject({ kind: "expired" });
+            expect(rules.stripeEventToPayment(ev("charge.refunded", { refunded: true, metadata: { orderId: "o1" } }))).toMatchObject({ kind: "refunded", orderId: "o1" });
+            expect(rules.stripeEventToPayment(ev("charge.refunded", { amount: 100, amount_refunded: 50, metadata: { orderId: "o1" } }))).toBeNull(); // parcial
+            expect(rules.stripeEventToPayment(ev("customer.created", {}))).toBeNull();
+            expect(rules.stripeEventToPayment(null)).toBeNull();
         });
     });
 
-    describe("notificaciones push", () => {
-        it("reconoce tokens de Expo y rechaza basura", () => {
-            expect(rules.isExpoPushToken("ExponentPushToken[abcdefghijklmnopqrstuv]")).toBe(true);
-            expect(rules.isExpoPushToken("ExpoPushToken[abcdefghij_klm-n]")).toBe(true);
-            for (const bad of ["", "abc", "ExponentPushToken[]", "ExponentPushToken[<script>alert(1)</script>]", null, undefined, 5]) expect(rules.isExpoPushToken(bad)).toBe(false);
-        });
-        it("el mensaje al cliente no incluye datos personales", () => {
+    describe("notificaciones push (Appwrite Messaging)", () => {
+        it("el mensaje al cliente no incluye datos personales y sus datos son texto", () => {
             const n = rules.buildStatusNotification("on_the_way", "ord123456");
-            expect(n).toMatchObject({ title: "¡Tu pedido va en camino!", data: { orderId: "ord123456", status: "on_the_way" } });
+            expect(n).toMatchObject({ title: "¡Tu pedido va en camino!", data: { type: "order_status", orderId: "ord123456", status: "on_the_way" } });
             expect(JSON.stringify(n)).not.toMatch(/direcci|tel[eé]fono|\d{10}/i);
             expect(rules.buildStatusNotification("pending", "o")).toBeNull();
             expect(rules.buildStatusNotification("raro", "o")).toBeNull();
             expect(rules.buildAssignmentNotification("abcdef123456").body).toContain("#123456");
         });
-        it("detecta qué tokens purgar según la respuesta de Expo", () => {
-            const resp = { data: [{ status: "ok" }, { status: "error", details: { error: "DeviceNotRegistered" } }, { status: "error", details: { error: "MessageTooBig" } }] };
-            expect(rules.tokensToPurge(resp, ["a", "b", "c"])).toEqual(["b"]);
-            expect(rules.tokensToPurge(null, ["a"])).toEqual([]);
-            expect(rules.tokensToPurge({ data: "x" }, ["a"])).toEqual([]);
+        it("hay aviso para cada evento relevante del pedido", () => {
+            for (const s of ["confirmed", "preparing", "on_the_way", "delivered", "cancelled"]) expect(rules.buildStatusNotification(s, "ord123456")).not.toBeNull();
+            expect(rules.buildOrderReceivedNotification("ord123456").title).toBe("Pedido recibido");
+            for (const s of ["paid", "failed", "refunded"]) expect(rules.buildPaymentNotification(s, "ord123456").data).toMatchObject({ type: "order_status", orderId: "ord123456", payment: s });
+        });
+        it("la petición a Messaging va solo a la cuenta indicada y con data en texto (FCM)", () => {
+            const req = rules.buildPushRequest("u1", rules.buildStatusNotification("delivered", "ord123456"));
+            expect(req.users).toEqual(["u1"]);
+            expect(Object.values(req.data).every((v) => typeof v === "string")).toBe(true);
+            expect(req).toMatchObject({ title: "Pedido entregado" });
         });
     });
 });

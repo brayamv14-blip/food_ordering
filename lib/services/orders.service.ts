@@ -7,6 +7,8 @@ import {
     client,
     databases
 } from "@/lib/appwrite";
+import { Platform } from "react-native";
+
 import { CartItemType } from "@/type";
 import { DeliveryAddress, validateDeliveryAddress } from "@/lib/domain/address";
 import { Order, mapOrderRow } from "@/lib/domain/order";
@@ -258,9 +260,24 @@ export async function cancelMyOrder(order: Pick<Order, "id" | "status">): Promis
     // cancelOrder valida de nuevo en servidor (o con lectura previa en modo desarrollo).
     await cancelOrder(order.id);
 }
+/**
+ * Realtime en web; consulta periódica en Android/iOS.
+ * El observador de pedidos realiza consultas de respaldo cada 10 segundos.
+ */
 
-/** Suscripcion en tiempo real a una fila de pedido. Devuelve la funcion de cierre. */
-export function subscribeToOrder(orderId: string, onEvent: () => void): () => void {
-    const channel = Channel.tablesdb(DB()).table(ORDERS()).row(orderId).toString();
+export function subscribeToOrder(
+    orderId: string,
+    onEvent: () => void
+): (() => void) | undefined {
+    // En Android e iOS se utiliza el sondeo periódico del observador.
+    if (Platform.OS !== "web") {
+        return undefined;
+    }
+
+    const channel = Channel.tablesdb(DB())
+        .table(ORDERS())
+        .row(orderId)
+        .toString();
+
     return client.subscribe(channel, () => onEvent());
 }

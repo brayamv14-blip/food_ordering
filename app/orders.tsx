@@ -10,7 +10,7 @@ import { isTrackable } from "@/lib/domain/orderStatus";
 import { formatMoney } from "@/lib/domain/pricing";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
 import { describePayment, describeProviderStatus } from "@/lib/domain/payment";
-import { openCheckout, syncPayment } from "@/lib/services/payments.service";
+import { openCheckout, requestPaymentUrl, syncPayment } from "@/lib/services/payments.service";
 import { reorderToCart } from "@/lib/services/reorder.service";
 
 const Orders = () => {
@@ -45,10 +45,10 @@ const Orders = () => {
 
     // Paga (o reintenta pagar) un pedido en linea pendiente; despues el servidor verifica el pago.
     const payNow = async (order: Order) => {
-        if (!order.paymentUrl || busyId) return;
+        if (busyId) return;
         setBusyId(order.id);
         try {
-            await openCheckout(order.paymentUrl);
+            await openCheckout(await requestPaymentUrl(order.id));
             await verifyPayment(order);
         } catch {
             Alert.alert("Pago", "No pudimos completar la operación. Puedes intentarlo de nuevo desde aquí.");
@@ -226,16 +226,14 @@ const Orders = () => {
                                         </View>
                                         {pay.actionable && (
                                             <View className="mt-3 flex-row">
-                                                {item.paymentUrl && (
-                                                    <TouchableOpacity
-                                                        onPress={() => payNow(item)}
-                                                        disabled={busyId === item.id}
-                                                        className="mr-2 rounded-xl bg-primary px-4 py-2"
-                                                        accessibilityRole="button"
-                                                    >
-                                                        <Text className="font-bold text-white">Pagar ahora</Text>
-                                                    </TouchableOpacity>
-                                                )}
+                                                <TouchableOpacity
+                                                    onPress={() => payNow(item)}
+                                                    disabled={busyId === item.id}
+                                                    className="mr-2 rounded-xl bg-primary px-4 py-2"
+                                                    accessibilityRole="button"
+                                                >
+                                                    <Text className="font-bold text-white">Pagar ahora</Text>
+                                                </TouchableOpacity>
                                                 <TouchableOpacity
                                                     onPress={() => checkPayment(item)}
                                                     disabled={busyId === item.id}

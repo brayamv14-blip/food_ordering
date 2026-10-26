@@ -32,10 +32,8 @@ export interface Order {
     discount: number;
     total: number;
     paymentMethod: string;
-    /** `paid`, `pending` o `not_required`; null si el pedido es anterior a esta columna. */
+    /** `not_required`, `pending`, `paid`, `failed`, `cancelled` o `refunded`; null si el pedido es anterior a esta columna. */
     paymentStatus: string | null;
-    /** Enlace de pago en linea (solo si esta pendiente). */
-    paymentUrl: string | null;
     createdAt: string;
     updatedAt: string | null;
     deliveryAddress: DeliveryAddress | null;
@@ -116,7 +114,6 @@ export function mapOrderRow(row: Row, itemRows: Row[] = []): Order {
         total: num(row.total),
         paymentMethod: str(row.paymentMethod) || "cash_on_delivery",
         paymentStatus: str(row.paymentStatus) || null,
-        paymentUrl: str(row.paymentUrl) || null,
         createdAt: str(row.$createdAt),
         updatedAt: str(row.$updatedAt) || null,
         deliveryAddress: address,

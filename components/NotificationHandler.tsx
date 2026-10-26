@@ -3,6 +3,7 @@ import * as Notifications from "expo-notifications";
 import { router } from "expo-router";
 
 import { routeFromNotificationData } from "@/lib/domain/notifications";
+import { ensureOrdersChannel, refreshPushToken } from "@/lib/services/notifications.service";
 
 /**
  * Muestra las notificaciones con la app abierta y lleva a la pantalla correcta al
@@ -32,7 +33,16 @@ const NotificationHandler = () => {
         const sub = Notifications.addNotificationResponseReceivedListener((r) =>
             open(r.notification.request.content.data)
         );
-        return () => sub.remove();
+        // FCM puede renovar el token: se actualiza el destino de Appwrite si este dispositivo ya estaba registrado.
+        const tokenSub = Notifications.addPushTokenListener((t) => {
+            void refreshPushToken(t.data);
+        });
+        ensureOrdersChannel().catch(() => {});
+
+        return () => {
+            sub.remove();
+            tokenSub.remove();
+        };
     }, []);
 
     return null;

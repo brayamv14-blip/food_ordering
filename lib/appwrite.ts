@@ -49,6 +49,9 @@ export const appwriteConfig = {
     // correo de recuperacion; ver recovery-bridge/index.html.
     recoveryUrl: process.env.EXPO_PUBLIC_RECOVERY_URL ?? "",
 
+    // Proveedor FCM de Appwrite Messaging (ID, no secreto). Sin el, las notificaciones quedan desactivadas.
+    pushProviderId: process.env.EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID ?? "",
+
     functions: {
         createOrder: process.env.EXPO_PUBLIC_FN_CREATE_ORDER ?? "",
         updateOrderStatus: process.env.EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS ?? ""
@@ -112,11 +115,16 @@ const avatars = new Avatars(client);
 // CREAR USUARIO
 // ======================================================
 
+
 export const createUser = async ({
     email,
     password,
-    name
+    name,
+    phone,
 }: CreateUserParams) => {
+    let accountId: string;
+    let accountName = name;
+
     try {
         const newAccount = await account.create(
             ID.unique(),
@@ -125,34 +133,86 @@ export const createUser = async ({
             name
         );
 
-        if (!newAccount) {
-            throw new Error("No se pudo crear la cuenta");
+        accountId = newAccount.$id;
+        accountName = newAccount.name || name;
+
+        await signIn({ email, password });
+    } catch (error: unknown) {
+        const appwriteError = error as {
+            code?: number;
+            type?: string;
+            message?: string;
+        };
+
+        const isDuplicate =
+            appwriteError.code === 409 ||
+            appwriteError.type === "user_already_exists" ||
+            /already exists|same id, email, or phone/i.test(
+                appwriteError.message ?? ""
+            );
+
+        if (!isDuplicate) {
+            throw error;
         }
 
-        // Iniciar sesión automáticamente
-        await signIn({
-            email,
-            password
+        /*
+         * Si el registro anterior creó la cuenta pero falló al crear
+         * el perfil, permite recuperar el proceso con las credenciales
+         * correctas y el teléfono que introduce el usuario.
+         */
+        await signIn({ email, password });
+
+        const currentAccount = await account.get();
+
+        accountId = currentAccount.$id;
+        accountName = currentAccount.name || name;
+    }
+
+    const findProfile = async () => {
+        const result = await databases.listRows({
+            databaseId: appwriteConfig.databaseId,
+            tableId: appwriteConfig.userCollectionId,
+            queries: [
+                Query.equal("accountId", accountId),
+            ],
         });
 
-        const avatarUrl = avatars.getInitialsURL(name);
+        return result.rows[0];
+    };
 
+    const existingProfile = await findProfile();
+
+    if (existingProfile) {
+        return existingProfile;
+    }
+
+    try {
         return await databases.createRow({
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
             rowId: ID.unique(),
             data: {
                 email,
-                name,
-                accountId: newAccount.$id,
-                avatar: avatarUrl
-            }
+                name: accountName,
+                phone,
+                accountId,
+                avatar: avatars.getInitialsURL(
+                    accountName || email
+                ),
+            },
         });
+    } catch (error) {
+        /*
+         * Si otra petición creó el perfil simultáneamente,
+         * recuperamos esa fila en lugar de duplicarla.
+         */
+        const createdProfile = await findProfile();
 
-    } catch (e) {
-        console.log("Error al crear usuario:", e);
+        if (createdProfile) {
+            return createdProfile;
+        }
 
-        throw e;
+        throw error;
     }
 };
 

@@ -32,6 +32,7 @@ import {
 } from "@/lib/domain/address";
 import { computeOrderTotals, unitPrice, formatMoney } from "@/lib/domain/pricing";
 import { findUnavailableItems } from "@/lib/services/catalog.service";
+import AddressPicker from "@/components/AddressPicker";
 import { PAYMENT_LABELS, PaymentMethod, describeProviderStatus } from "@/lib/domain/payment";
 import { isOnlinePaymentEnabled, openCheckout, syncPayment } from "@/lib/services/payments.service";
 
@@ -51,6 +52,7 @@ const Checkout = () => {
     const [profileError, setProfileError] = useState<string | null>(null);
     const [choice, setChoice] = useState<AddressChoice>("home");
     const [manualAddress, setManualAddress] = useState("");
+    const [manualCoords, setManualCoords] = useState<{ latitude: number; longitude: number } | null>(null);
     const [phone, setPhone] = useState("");
     const [payment, setPayment] = useState<PaymentMethod>("cash_on_delivery");
     const onlineAvailable = isOnlinePaymentEnabled();
@@ -92,7 +94,7 @@ const Checkout = () => {
 
     const currentAddress = (): Partial<DeliveryAddress> | null => {
         if (choice === "manual") {
-            return { label: "manual", line: manualAddress, latitude: null, longitude: null };
+            return { label: "manual", line: manualAddress, latitude: manualCoords?.latitude ?? null, longitude: manualCoords?.longitude ?? null };
         }
         return saved.find((a) => a.label === choice) ?? null;
     };
@@ -147,7 +149,7 @@ const Checkout = () => {
             requestIdRef.current = newClientRequestId();
 
             if (result.checkoutUrl) {
-                // Pago en linea: el pedido ya existe (pendiente de pago). Se abre Mercado Pago y,
+                // Pago en linea: el pedido ya existe (pendiente de pago). Se abre Stripe Checkout y,
                 // al volver, el SERVIDOR verifica el pago; la app nunca da un pedido por pagado.
                 let message = "Tu pedido quedó registrado. Puedes pagarlo o verificar el pago en Mis pedidos.";
                 try {
@@ -226,7 +228,10 @@ const Checkout = () => {
                                 {choice === "manual" ? (
                                     <TextInput
                                         value={manualAddress}
-                                        onChangeText={setManualAddress}
+                                        onChangeText={(v) => {
+                                            setManualAddress(v);
+                                            setManualCoords(null); // si se edita el texto a mano, las coordenadas ya no corresponden
+                                        }}
                                         placeholder="Calle, número, colonia, municipio"
                                         multiline
                                         className="paragraph-regular text-dark-100"
@@ -239,6 +244,17 @@ const Checkout = () => {
                                 )}
                             </View>
                         </View>
+                        {choice === "manual" && (
+                            <View className="mt-4">
+                                <AddressPicker
+                                    onSelect={(p) => {
+                                        setManualAddress(p.line);
+                                        setManualCoords({ latitude: p.latitude, longitude: p.longitude });
+                                    }}
+                                />
+                                {manualCoords && <Text className="mt-2 text-xs text-green-600">Ubicación confirmada en el mapa.</Text>}
+                            </View>
+                        )}
                         {saved.length === 0 && (
                             <TouchableOpacity onPress={() => router.push("/edit-profile")} className="mt-3">
                                 <Text className="small-bold text-primary">Guardar direcciones en mi perfil</Text>

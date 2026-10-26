@@ -238,38 +238,182 @@ function validatePaymentMethod(value) {
     return { ok: true, method: value };
 }
 
-/**
- * Cuerpo de la preferencia de Mercado Pago (Checkout Pro). Un solo concepto con el
- * total ya calculado por el servidor: el cliente nunca decide el importe.
- */
-function buildPreferenceBody({ orderId, total, returnUrl, currency = 'MXN' }) {
-    return {
-        items: [{ id: orderId, title: `Pedido Delivery #${String(orderId).slice(-6)}`, quantity: 1, unit_price: Number(total), currency_id: currency }],
-        external_reference: orderId,
-        back_urls: { success: returnUrl, failure: returnUrl, pending: returnUrl },
-        auto_return: 'approved'
-    };
-}
+// ======================================================
+// PAGOS CON STRIPE (Checkout alojado). El cliente nunca decide el importe ni
+// si un pedido esta pagado: todo se calcula y se verifica en el servidor.
+// ======================================================
+
+const CURRENCY = 'mxn';
+const PAYMENT_STATUSES = ['not_required', 'pending', 'paid', 'failed', 'cancelled', 'refunded'];
 
 /**
- * Entre los pagos devueltos por Mercado Pago, busca uno aprobado cuyo importe y
- * moneda coincidan EXACTAMENTE con el pedido (evita pagar de menos).
+ * Maquina de estados del pago. Repetir el mismo estado es un "no-op" (idempotencia:
+ * un webhook recibido varias veces no cambia nada ni vuelve a notificar).
+ * `paid` solo puede pasar a `refunded`; nunca vuelve atras.
  */
-function pickApprovedPayment(results, { total, currency = 'MXN' }) {
-    if (!Array.isArray(results)) return null;
-    const cents = (n) => Math.round((Number(n) + Number.EPSILON) * 100);
-    return results.find((p) => p && p.status === 'approved' && p.currency_id === currency && cents(p.transaction_amount) === cents(total)) || null;
+const PAYMENT_TRANSITIONS = {
+    not_required: [],
+    pending: ['paid', 'failed', 'cancelled'],
+    failed: ['paid', 'cancelled'],
+    paid: ['refunded'],
+    cancelled: ['refunded'], // pago tardio sobre un pedido ya cancelado: se reembolsa solo
+    refunded: []
+};
+
+function movePaymentStatus(from, to) {
+    const current = PAYMENT_STATUSES.includes(from) ? from : 'pending';
+    if (!PAYMENT_STATUSES.includes(to)) return { ok: false, code: 'bad_payment_status', error: 'Estado de pago inválido.' };
+    if (current === to) return { ok: true, changed: false, status: current };
+    if (!PAYMENT_TRANSITIONS[current].includes(to)) {
+        return { ok: false, code: 'payment_transition', error: `El pago no puede pasar de ${current} a ${to}.` };
+    }
+    return { ok: true, changed: true, status: to };
 }
 
-/** Estado mas reciente informado por Mercado Pago (para mostrar al usuario). */
-function latestPaymentStatus(results) {
-    if (!Array.isArray(results) || results.length === 0) return null;
-    const sorted = [...results].sort((a, b) => String(b.date_created || '').localeCompare(String(a.date_created || '')));
-    return typeof sorted[0].status === 'string' ? sorted[0].status : null;
+/** Parametros de la sesion de Stripe Checkout (pares clave/valor; el importe viene del servidor). */
+function buildCheckoutSessionParams({ orderId, userId, total, returnUrl, now = Date.now(), currency = CURRENCY }) {
+    const sep = String(returnUrl).includes('?') ? '&' : '?';
+    const enc = encodeURIComponent(orderId);
+    return [
+        ['mode', 'payment'],
+        ['client_reference_id', orderId],
+        ['success_url', `${returnUrl}${sep}result=success&order=${enc}`],
+        ['cancel_url', `${returnUrl}${sep}result=cancelled&order=${enc}`],
+        ['payment_method_types[0]', 'card'],
+        ['line_items[0][quantity]', '1'],
+        ['line_items[0][price_data][currency]', currency],
+        ['line_items[0][price_data][unit_amount]', String(toCents(total))],
+        ['line_items[0][price_data][product_data][name]', `Pedido Delivery #${String(orderId).slice(-6)}`],
+        ['metadata[orderId]', orderId],
+        ['metadata[userId]', userId],
+        ['payment_intent_data[metadata][orderId]', orderId],
+        ['payment_intent_data[metadata][userId]', userId],
+        // Stripe exige entre 30 min y 24 h; despues la sesion expira y el pedido puede reintentarse.
+        ['expires_at', String(Math.floor(now / 1000) + 31 * 60)]
+    ];
 }
 
-const EXPO_TOKEN_RE = /^Expo(nent)?PushToken\[[A-Za-z0-9_-]{10,}\]$/;
-const isExpoPushToken = (t) => typeof t === 'string' && EXPO_TOKEN_RE.test(t);
+const formEncode = (pairs) => pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+
+/**
+ * Evalua una sesion de Stripe contra el pedido guardado en el servidor.
+ * Solo es `paid` si Stripe confirma el cobro, el importe y la moneda son EXACTOS y la
+ * sesion pertenece a ese pedido (evita pagar de menos o usar la sesion de otro pedido).
+ */
+function checkSessionPayment(session, { orderId, total, currency = CURRENCY }) {
+    if (!session || typeof session !== 'object') return { state: 'unknown', reason: 'no_session' };
+    const belongs = session.client_reference_id === orderId && (!session.metadata || session.metadata.orderId === orderId);
+    if (!belongs) return { state: 'invalid', reason: 'wrong_order' };
+    if (session.status === 'expired') return { state: 'expired', reason: 'expired' };
+    if (session.payment_status === 'paid' && session.status === 'complete') {
+        if (String(session.currency || '').toLowerCase() !== currency) return { state: 'invalid', reason: 'currency_mismatch' };
+        if (session.amount_total !== toCents(total)) return { state: 'invalid', reason: 'amount_mismatch' };
+        return { state: 'paid', reason: 'ok' };
+    }
+    return { state: 'unpaid', reason: session.payment_status || 'unpaid' };
+}
+
+/** Id del PaymentIntent de una sesion (puede venir como texto o expandido). */
+function paymentIntentId(session) {
+    const pi = session && session.payment_intent;
+    return typeof pi === 'string' ? pi : pi && typeof pi === 'object' && typeof pi.id === 'string' ? pi.id : null;
+}
+
+/** Cabecera `Stripe-Signature`: "t=...,v1=...,v1=...". Devuelve null si no es valida. */
+function parseStripeSignatureHeader(header) {
+    if (typeof header !== 'string' || header.length > 2000) return null;
+    let timestamp = null;
+    const signatures = [];
+    for (const part of header.split(',')) {
+        const i = part.indexOf('=');
+        if (i < 1) continue;
+        const k = part.slice(0, i).trim();
+        const v = part.slice(i + 1).trim();
+        if (k === 't' && /^\d{1,12}$/.test(v)) timestamp = Number(v);
+        else if (k === 'v1' && /^[0-9a-f]{64}$/i.test(v)) signatures.push(v.toLowerCase());
+    }
+    return timestamp !== null && signatures.length > 0 ? { timestamp, signatures } : null;
+}
+
+/** El evento firmado solo vale si es reciente (proteccion contra repeticion). */
+function isFreshTimestamp(timestamp, nowMs = Date.now(), toleranceSec = 300) {
+    return Number.isFinite(timestamp) && Math.abs(Math.floor(nowMs / 1000) - timestamp) <= toleranceSec;
+}
+
+/** Cadena que Stripe firma con HMAC-SHA256: "<timestamp>.<cuerpo crudo>". */
+const signedPayload = (timestamp, rawBody) => `${timestamp}.${rawBody}`;
+
+/**
+ * Traduce un evento de Stripe a un cambio de pago. Devuelve null para eventos ignorados.
+ * `kind`: paid | failed | expired | refunded.
+ */
+function stripeEventToPayment(event) {
+    if (!event || typeof event !== 'object' || typeof event.type !== 'string') return null;
+    const obj = event.data && event.data.object;
+    if (!obj || typeof obj !== 'object') return null;
+    switch (event.type) {
+        case 'checkout.session.completed':
+            // Con pago diferido llega "unpaid": se espera async_payment_succeeded.
+            return obj.payment_status === 'paid' ? { kind: 'paid', orderId: obj.client_reference_id, session: obj } : null;
+        case 'checkout.session.async_payment_succeeded':
+            return { kind: 'paid', orderId: obj.client_reference_id, session: obj };
+        case 'checkout.session.async_payment_failed':
+            return { kind: 'failed', orderId: obj.client_reference_id, session: obj };
+        case 'checkout.session.expired':
+            return { kind: 'expired', orderId: obj.client_reference_id, session: obj };
+        case 'charge.refunded': {
+            // Solo un reembolso total cambia el estado del pago a `refunded`.
+            const full = obj.refunded === true || (typeof obj.amount === 'number' && obj.amount_refunded === obj.amount);
+            const orderId = obj.metadata && obj.metadata.orderId;
+            return full && typeof orderId === 'string' ? { kind: 'refunded', orderId, charge: obj } : null;
+        }
+        default:
+            return null;
+    }
+}
+
+/**
+ * Llamada a la API de Stripe (form-urlencoded). La clave secreta solo existe en el servidor.
+ * `idempotencyKey` evita cobros/reembolsos duplicados si la llamada se repite.
+ */
+async function stripeRequest({ secret, method = 'POST', path, params = [], idempotencyKey, fetchImpl = fetch, timeoutMs = 10000 }) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const headers = { Authorization: `Bearer ${secret}` };
+        const init = { method, headers, signal: ctrl.signal };
+        let url = `https://api.stripe.com${path}`;
+        if (method === 'GET') {
+            if (params.length) url += `?${formEncode(params)}`;
+        } else {
+            headers['Content-Type'] = 'application/x-www-form-urlencoded';
+            if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+            init.body = formEncode(params);
+        }
+        const res = await fetchImpl(url, init);
+        const data = await res.json().catch(() => null);
+        return { ok: res.ok, status: res.status, data };
+    } catch {
+        return { ok: false, status: 0, data: null };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/** Enlaces de pago que la app acepta abrir (los mismos que valida el cliente). */
+const isStripeCheckoutUrl = (url) => {
+    try {
+        const u = new URL(url);
+        return u.protocol === 'https:' && u.hostname === 'checkout.stripe.com';
+    } catch {
+        return false;
+    }
+};
+
+// ======================================================
+// NOTIFICACIONES PUSH (Appwrite Messaging + FCM). El servidor decide a quien se avisa.
+// Los valores de `data` van como texto porque FCM no acepta otros tipos.
+// ======================================================
 
 const STATUS_MESSAGES = {
     confirmed: ['Pedido confirmado', 'El restaurante confirmó tu pedido.'],
@@ -283,24 +427,39 @@ const STATUS_MESSAGES = {
 function buildStatusNotification(status, orderId) {
     const m = STATUS_MESSAGES[status];
     if (!m) return null;
-    return { title: m[0], body: m[1], data: { type: 'order_status', orderId, status }, channelId: 'orders', sound: 'default' };
+    return { title: m[0], body: m[1], data: { type: 'order_status', orderId, status } };
+}
+
+/** "Pedido recibido": al crearlo (efectivo) o al confirmarse el pago (en linea). */
+function buildOrderReceivedNotification(orderId) {
+    return { title: 'Pedido recibido', body: `Recibimos tu pedido #${String(orderId).slice(-6)}.`, data: { type: 'order_status', orderId, status: 'pending' } };
 }
 
 function buildAssignmentNotification(orderId) {
-    return { title: 'Nueva entrega asignada', body: `Tienes el pedido #${String(orderId).slice(-6)} por entregar.`, data: { type: 'driver_assigned', orderId }, channelId: 'orders', sound: 'default' };
+    return { title: 'Nueva entrega asignada', body: `Tienes el pedido #${String(orderId).slice(-6)} por entregar.`, data: { type: 'driver_assigned', orderId } };
+}
+
+const PAYMENT_MESSAGES = {
+    paid: ['Pago recibido', 'Confirmamos tu pago. Tu pedido sigue su curso.'],
+    refunded: ['Reembolso emitido', 'Te devolvimos el importe de tu pedido cancelado.'],
+    failed: ['Pago no completado', 'Tu pago no se pudo completar. Puedes reintentarlo desde Mis pedidos.']
+};
+
+function buildPaymentNotification(kind, orderId) {
+    const m = PAYMENT_MESSAGES[kind];
+    if (!m) return null;
+    return { title: m[0], body: m[1], data: { type: 'order_status', orderId, payment: kind } };
 }
 
 /**
- * Interpreta la respuesta de Expo y devuelve los tokens que ya no sirven
- * (DeviceNotRegistered) para borrarlos. `tokens` conserva el orden del envio.
+ * Parametros de `messaging.createPush`. Solo se envia al usuario indicado por el servidor;
+ * nunca a destinatarios elegidos por el cliente. Devuelve null si falta algo.
  */
-function tokensToPurge(response, tokens) {
-    const tickets = response && Array.isArray(response.data) ? response.data : [];
-    const out = [];
-    tickets.forEach((t, i) => {
-        if (t && t.status === 'error' && t.details && t.details.error === 'DeviceNotRegistered' && tokens[i]) out.push(tokens[i]);
-    });
-    return out;
+function buildPushRequest(accountId, message) {
+    if (typeof accountId !== 'string' || !accountId || !message || !message.title) return null;
+    const data = {};
+    for (const [k, v] of Object.entries(message.data || {})) if (v !== undefined && v !== null) data[k] = String(v);
+    return { title: String(message.title).slice(0, 100), body: String(message.body || '').slice(0, 250), users: [accountId], data };
 }
 
 export {
@@ -308,6 +467,8 @@ export {
     canActorTransition, priceOrder, validateDriverPosition,
     validateAddressInput, validatePhone, canAssignDriver, toStaffOrderView,
     checkExpected, parseDateRange, matchesOrderQuery, buildOrderEvent, isMenuAvailable,
-    PAYMENT_METHODS, validatePaymentMethod, buildPreferenceBody, pickApprovedPayment, latestPaymentStatus,
-    isExpoPushToken, buildStatusNotification, buildAssignmentNotification, tokensToPurge
+    PAYMENT_METHODS, PAYMENT_STATUSES, PAYMENT_TRANSITIONS, CURRENCY, validatePaymentMethod, movePaymentStatus,
+    buildCheckoutSessionParams, formEncode, checkSessionPayment, paymentIntentId,
+    parseStripeSignatureHeader, isFreshTimestamp, signedPayload, stripeEventToPayment, stripeRequest, isStripeCheckoutUrl,
+    buildStatusNotification, buildOrderReceivedNotification, buildAssignmentNotification, buildPaymentNotification, buildPushRequest
 };

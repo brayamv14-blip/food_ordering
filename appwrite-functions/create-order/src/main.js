@@ -1,5 +1,8 @@
-import { Client, ID, Permission, Query, Role, TablesDB, Users } from 'node-appwrite';
-import { buildOrderEvent, buildPreferenceBody, priceOrder, validateAddressInput, validatePaymentMethod, validatePhone } from './rules.js';
+import { Client, ID, Messaging, Permission, Query, Role, TablesDB, Users } from 'node-appwrite';
+import {
+    buildCheckoutSessionParams, buildOrderEvent, buildOrderReceivedNotification, buildPushRequest, isStripeCheckoutUrl,
+    priceOrder, stripeRequest, validateAddressInput, validatePaymentMethod, validatePhone
+} from './rules.js';
 
 const DB = process.env.DATABASE_ID;
 const ORDERS = process.env.ORDERS_TABLE_ID;
@@ -11,29 +14,25 @@ const MENU_CUSTOMIZATIONS = process.env.MENU_CUSTOMIZATIONS_TABLE_ID;
 const EVENTS = process.env.ORDER_EVENTS_TABLE_ID; // opcional: historial de cambios
 const DELIVERY_FEE = Number(process.env.DELIVERY_FEE ?? 5);
 const DISCOUNT = Number(process.env.DISCOUNT ?? 0.5);
-// Pago en linea (Mercado Pago Checkout Pro). Sin estas variables el pago en linea se rechaza.
-const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
+// Pago en linea (Stripe Checkout alojado). Sin estas variables el pago en linea se rechaza.
+// STRIPE_SECRET_KEY vive SOLO aqui (variable de la Function), nunca en la app ni en EXPO_PUBLIC_*.
+const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
 const PAYMENT_RETURN_URL = process.env.PAYMENT_RETURN_URL;
 
-/** Crea la preferencia de pago. Devuelve la URL de pago o null si falla. */
-async function createPaymentPreference(orderId, total) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10000);
-    try {
-        const res = await fetch('https://api.mercadopago.com/checkout/preferences', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${MP_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildPreferenceBody({ orderId, total, returnUrl: PAYMENT_RETURN_URL })),
-            signal: ctrl.signal
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        return typeof data?.init_point === 'string' && data.init_point.startsWith('https://') ? data.init_point : null;
-    } catch {
-        return null;
-    } finally {
-        clearTimeout(timer);
-    }
+/**
+ * Crea la sesion de Stripe Checkout con el importe calculado en el servidor.
+ * La clave de idempotencia ligada al pedido evita crear dos sesiones (y dos cobros) por reintentos.
+ */
+async function createCheckoutSession(orderId, userId, total) {
+    const res = await stripeRequest({
+        secret: STRIPE_KEY,
+        path: '/v1/checkout/sessions',
+        params: buildCheckoutSessionParams({ orderId, userId, total, returnUrl: PAYMENT_RETURN_URL }),
+        idempotencyKey: `checkout-${orderId}-1`
+    });
+    const s = res.data;
+    if (!res.ok || !s || typeof s.id !== 'string' || !isStripeCheckoutUrl(s.url)) return null;
+    return { id: s.id, url: s.url };
 }
 
 const fail = (res, status, code, error) => res.json({ code, error }, status);
@@ -49,6 +48,18 @@ export default async ({ req, res, log, error }) => {
         .setKey(req.headers['x-appwrite-key']);
     const db = new TablesDB(client);
     const users = new Users(client);
+    const messaging = new Messaging(client);
+
+    // Notificacion push (Appwrite Messaging). Mejor esfuerzo: nunca bloquea ni hace fallar el pedido.
+    const notify = async (accountId, message) => {
+        const req = buildPushRequest(accountId, message);
+        if (!req) return;
+        try {
+            await messaging.createPush({ messageId: ID.unique(), ...req });
+        } catch (e) {
+            error(`push_failed: ${e.message}`);
+        }
+    };
 
     let body;
     try {
@@ -68,7 +79,7 @@ export default async ({ req, res, log, error }) => {
     const pay = validatePaymentMethod(body.paymentMethod);
     if (!pay.ok) return fail(res, 400, pay.code, pay.error);
     const online = pay.method === 'online';
-    if (online && (!MP_TOKEN || !PAYMENT_RETURN_URL)) {
+    if (online && (!STRIPE_KEY || !PAYMENT_RETURN_URL)) {
         return fail(res, 503, 'payment_unavailable', 'El pago en línea no está disponible por el momento.');
     }
 
@@ -82,11 +93,8 @@ export default async ({ req, res, log, error }) => {
         });
         if (existing.rows[0]) {
             if (existing.rows[0].userId !== userId) return fail(res, 409, 'conflict', 'Identificador en uso.');
-            const prev = existing.rows[0];
-            return res.json({
-                orderId: prev.$id, duplicate: true,
-                ...(prev.paymentMethod === 'online' && prev.paymentStatus === 'pending' && prev.paymentUrl ? { checkoutUrl: prev.paymentUrl } : {})
-            });
+            // Un reintento nunca crea otro pedido ni otro cobro; si falta pagar, el cliente usa "Pagar ahora" (action payOrder).
+            return res.json({ orderId: existing.rows[0].$id, duplicate: true });
         }
 
         if (!Array.isArray(items)) return fail(res, 422, 'empty_cart', 'El pedido no tiene productos.');
@@ -173,14 +181,27 @@ export default async ({ req, res, log, error }) => {
 
         let checkoutUrl;
         if (online) {
-            checkoutUrl = await createPaymentPreference(order.$id, priced.total);
-            if (!checkoutUrl) {
-                // Sin enlace de pago el pedido no se puede completar: se deshace todo.
+            const session = await createCheckoutSession(order.$id, userId, priced.total);
+            let saved = false;
+            if (session) {
+                try {
+                    await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { stripeSessionId: session.id } });
+                    saved = true;
+                } catch (e) {
+                    error(`session_save_failed: ${e.message}`);
+                    await stripeRequest({ secret: STRIPE_KEY, path: `/v1/checkout/sessions/${session.id}/expire` });
+                }
+            }
+            if (!saved) {
+                // Sin sesion de pago el pedido no se puede completar: se deshace todo.
                 for (const id of created) await db.deleteRow({ databaseId: DB, tableId: ITEMS, rowId: id }).catch(() => {});
                 await db.deleteRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id }).catch(() => {});
                 return fail(res, 502, 'payment_unavailable', 'No se pudo iniciar el pago en línea. Inténtalo de nuevo.');
             }
-            await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { paymentUrl: checkoutUrl } });
+            checkoutUrl = session.url;
+        } else {
+            // Efectivo: el pedido ya esta recibido. En linea se avisa cuando Stripe confirma el pago.
+            await notify(userId, buildOrderReceivedNotification(order.$id));
         }
 
         log(`order ${order.$id} created`);

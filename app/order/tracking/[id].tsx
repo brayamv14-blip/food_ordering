@@ -1,48 +1,35 @@
-import { useEffect, useMemo, useRef } from "react";
-import { ActivityIndicator, Platform, Text, TouchableOpacity, View } from "react-native";
+import { useMemo } from "react";
+import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
+import LeafletMap from "@/components/LeafletMap";
 
 import useAuthStore from "@/store/auth.store";
 import { useOrderTracking } from "@/hooks/useOrderTracking";
 import { useRoute } from "@/hooks/useRoute";
 import { describeAge } from "@/lib/domain/coordinates";
 import { getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
+import { MapData, MapMarker } from "@/lib/domain/geo";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
 
 const TrackingScreen = () => {
     const { id } = useLocalSearchParams<{ id: string }>();
     const user = useAuthStore((s) => s.user);
     const { order, loading, error, stale } = useOrderTracking(id, user?.accountId ?? user?.$id);
-    const mapRef = useRef<MapView>(null);
 
     const driver = order?.driverLocation ?? null;
     const destination = order?.deliveryLocation ?? null;
     const route = useRoute(driver, destination);
-    const driverLat = driver?.latitude;
-    const driverLng = driver?.longitude;
-    const destLat = destination?.latitude;
-    const destLng = destination?.longitude;
-
-    // Ajusta la cámara a los puntos disponibles cada vez que cambian.
-    useEffect(() => {
-        const points: { latitude: number; longitude: number }[] = [];
-        if (driverLat !== undefined && driverLng !== undefined) points.push({ latitude: driverLat, longitude: driverLng });
-        if (destLat !== undefined && destLng !== undefined) points.push({ latitude: destLat, longitude: destLng });
-        if (points.length === 0 || !mapRef.current) return;
-        if (points.length === 1) {
-            mapRef.current.animateToRegion({ ...points[0], latitudeDelta: 0.01, longitudeDelta: 0.01 }, 500);
-        } else {
-            mapRef.current.fitToCoordinates(points, {
-                edgePadding: { top: 80, right: 60, bottom: 260, left: 60 },
-                animated: true
-            });
-        }
-    }, [driverLat, driverLng, destLat, destLng]);
-
     const lastUpdate = useMemo(() => describeAge(order?.driverUpdatedAt), [order?.driverUpdatedAt]);
+
+    // Solo puntos reales: el destino del pedido y la última ubicación que el repartidor sí compartió.
+    const mapData = useMemo<MapData>(() => {
+        const markers: MapMarker[] = [];
+        if (destination) markers.push({ id: "dest", kind: "destination", position: destination, label: "Destino" });
+        if (driver) markers.push({ id: "drv", kind: "driver", position: driver, label: order?.driverName ?? "Repartidor" });
+        return { markers, route: route?.ok ? route.points : [] };
+    }, [destination, driver, route, order?.driverName]);
 
     if (loading) {
         return (
@@ -66,42 +53,11 @@ const TrackingScreen = () => {
 
     const hasAnyCoordinate = !!driver || !!destination;
     const meta = getStatusMeta(order.rawStatus);
-    const fallbackRegion = { latitude: 19.4326, longitude: -99.1332, latitudeDelta: 0.5, longitudeDelta: 0.5 };
 
     return (
         <View className="flex-1 bg-white">
             {hasAnyCoordinate ? (
-                <MapView
-                    ref={mapRef}
-                    style={{ flex: 1 }}
-                    // En iOS se usaría Apple Maps si no se fuerza Google; aquí se exige Google.
-                    provider={Platform.OS === "android" || Platform.OS === "ios" ? PROVIDER_GOOGLE : undefined}
-                    initialRegion={
-                        driver || destination
-                            ? { ...(driver ?? destination)!, latitudeDelta: 0.02, longitudeDelta: 0.02 }
-                            : fallbackRegion
-                    }
-                >
-                    {destination && (
-                        <Marker
-                            coordinate={destination}
-                            title="Destino"
-                            description={order.deliveryAddress?.line}
-                            pinColor="#FE8C00"
-                        />
-                    )}
-                    {route?.ok && (
-                        <Polyline coordinates={route.points} strokeColor="#8B5CF6" strokeWidth={4} />
-                    )}
-                    {driver && (
-                        <Marker
-                            coordinate={driver}
-                            title={order.driverName ?? "Repartidor"}
-                            description={lastUpdate ? `Ubicación ${lastUpdate}` : undefined}
-                            pinColor="#8B5CF6"
-                        />
-                    )}
-                </MapView>
+                <LeafletMap style={{ flex: 1 }} data={mapData} />
             ) : (
                 <View className="flex-1 items-center justify-center px-8 bg-gray-100">
                     <Ionicons name="map-outline" size={56} color="#9CA3AF" />
@@ -142,7 +98,7 @@ const TrackingScreen = () => {
                 {route?.ok && route.durationSeconds !== null && (
                     <Text className="small-regular text-gray-200 mt-1">
                         Ruta por calles: ~{Math.max(1, Math.round(route.durationSeconds / 60))} min
-                        {route.distanceMeters !== null ? ` · ${(route.distanceMeters / 1000).toFixed(1)} km` : ""} (estimación de Google)
+                        {route.distanceMeters !== null ? ` · ${(route.distanceMeters / 1000).toFixed(1)} km` : ""} (estimación de Geoapify · OpenStreetMap)
                     </Text>
                 )}
                 {route && !route.ok && driver && destination && (

@@ -73,12 +73,14 @@ jest.mock("@/lib/services/orders.service", () => {
 });
 
 const mockOpen = jest.fn();
+const mockRequestUrl = jest.fn();
 const mockSync = jest.fn();
 const mockEnabled = jest.fn();
 
 jest.mock("@/lib/services/payments.service", () => ({
     isOnlinePaymentEnabled: () => mockEnabled(),
     openCheckout: (...args: any[]) => mockOpen(...args),
+    requestPaymentUrl: (...args: any[]) => mockRequestUrl(...args),
     syncPayment: (...args: any[]) => mockSync(...args)
 }));
 
@@ -96,8 +98,10 @@ jest.mock("expo-notifications", () => {
     const state = {
         handler: jest.fn(),
         listener: null as any,
+        tokenListener: null as any,
         last: jest.fn(),
-        remove: jest.fn()
+        remove: jest.fn(),
+        tokenRemove: jest.fn()
     };
 
     return {
@@ -107,9 +111,20 @@ jest.mock("expo-notifications", () => {
         addNotificationResponseReceivedListener: (callback: any) => {
             state.listener = callback;
             return { remove: state.remove };
+        },
+        addPushTokenListener: (callback: any) => {
+            state.tokenListener = callback;
+            return { remove: state.tokenRemove };
         }
     };
 });
+
+const mockRefreshToken = jest.fn();
+jest.mock("@/lib/services/notifications.service", () => ({
+    ensureOrdersChannel: () => Promise.resolve(),
+    refreshPushToken: (...a: any[]) => mockRefreshToken(...a)
+}));
+jest.mock("@/components/AddressPicker", () => ({ __esModule: true, default: () => null }));
 
 const mockNotif = jest.requireMock("expo-notifications").__state;
 
@@ -129,7 +144,6 @@ const order = (overrides: any = {}) => ({
     total: 24.5,
     paymentMethod: "cash_on_delivery",
     paymentStatus: "not_required",
-    paymentUrl: null,
     createdAt: "2026-10-20T10:00:00Z",
     updatedAt: null,
     deliveryAddress: {
@@ -206,11 +220,11 @@ describe("Mis pedidos: pago y pedir de nuevo", () => {
         mockFetchOrders.mockResolvedValue([
             order({
                 paymentMethod: "online",
-                paymentStatus: "pending",
-                paymentUrl: "https://www.mercadopago.com.mx/x"
+                paymentStatus: "pending"
             })
         ]);
 
+        mockRequestUrl.mockResolvedValue("https://checkout.stripe.com/c/pay/cs_test_a1");
         mockOpen.mockResolvedValue(undefined);
         mockSync.mockResolvedValue({ paymentStatus: "paid" });
 
@@ -220,7 +234,7 @@ describe("Mis pedidos: pago y pedir de nuevo", () => {
 
         await waitFor(() => {
             expect(mockOpen).toHaveBeenCalledWith(
-                "https://www.mercadopago.com.mx/x"
+                "https://checkout.stripe.com/c/pay/cs_test_a1"
             );
         });
 
@@ -231,26 +245,38 @@ describe("Mis pedidos: pago y pedir de nuevo", () => {
             );
         });
 
+        expect(mockRequestUrl).toHaveBeenCalledWith("ord123456");
         expect(mockSync).toHaveBeenCalledWith("ord123456");
+    });
+
+    it("un pago fallido o cancelado se puede reintentar; uno reembolsado no", async () => {
+        mockFetchOrders.mockResolvedValue([order({ id: "ordfail01", paymentMethod: "online", paymentStatus: "failed" })]);
+        render(<Orders />);
+        expect(await screen.findByText("Pagar ahora")).toBeTruthy();
+        expect(screen.getByText(/Pago fallido/)).toBeTruthy();
+    });
+
+    it("un pedido reembolsado no ofrece pagar", async () => {
+        mockFetchOrders.mockResolvedValue([order({ id: "ordrefd01", status: "cancelled", rawStatus: "cancelled", paymentMethod: "online", paymentStatus: "refunded" })]);
+        render(<Orders />);
+        expect(await screen.findByText("Pago reembolsado")).toBeTruthy();
+        expect(screen.queryByText("Pagar ahora")).toBeNull();
     });
 
     it("verificar un pago rechazado explica qué pasó y no lo da por pagado", async () => {
         mockFetchOrders.mockResolvedValue([
             order({
                 paymentMethod: "online",
-                paymentStatus: "pending",
-                paymentUrl: null
+                paymentStatus: "pending"
             })
         ]);
 
         mockSync.mockResolvedValue({
             paymentStatus: "pending",
-            providerStatus: "rejected"
+            providerStatus: "failed"
         });
 
         render(<Orders />);
-
-        expect(screen.queryByText("Pagar ahora")).toBeNull();
 
         fireEvent.press(await screen.findByText("Verificar pago"));
 
@@ -408,7 +434,7 @@ describe("checkout con pago en línea", () => {
         await choose();
 
         expect(
-            screen.queryByLabelText("Pago en línea (Mercado Pago)")
+            screen.queryByLabelText("Pago en línea (tarjeta)")
         ).toBeNull();
 
         expect(
@@ -416,11 +442,11 @@ describe("checkout con pago en línea", () => {
         ).toBeTruthy();
     });
 
-    it("paga en línea: guarda el pedido, abre Mercado Pago y verifica con el servidor", async () => {
+    it("paga en línea: guarda el pedido, abre Stripe Checkout y verifica con el servidor", async () => {
         mockCreate.mockResolvedValue({
             orderId: "o1",
             duplicate: false,
-            checkoutUrl: "https://www.mercadopago.com.mx/x"
+            checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_a1"
         });
 
         mockOpen.mockResolvedValue(undefined);
@@ -431,7 +457,7 @@ describe("checkout con pago en línea", () => {
         await choose();
 
         fireEvent.press(
-            screen.getByLabelText("Pago en línea (Mercado Pago)")
+            screen.getByLabelText("Pago en línea (tarjeta)")
         );
 
         fireEvent.press(
@@ -446,7 +472,7 @@ describe("checkout con pago en línea", () => {
 
         await waitFor(() => {
             expect(mockOpen).toHaveBeenCalledWith(
-                "https://www.mercadopago.com.mx/x"
+                "https://checkout.stripe.com/c/pay/cs_test_a1"
             );
         });
 
@@ -466,7 +492,7 @@ describe("checkout con pago en línea", () => {
         mockCreate.mockResolvedValue({
             orderId: "o1",
             duplicate: false,
-            checkoutUrl: "https://www.mercadopago.com.mx/x"
+            checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_a1"
         });
 
         mockOpen.mockResolvedValue(undefined);
@@ -481,7 +507,7 @@ describe("checkout con pago en línea", () => {
         await choose();
 
         fireEvent.press(
-            screen.getByLabelText("Pago en línea (Mercado Pago)")
+            screen.getByLabelText("Pago en línea (tarjeta)")
         );
 
         fireEvent.press(
@@ -491,7 +517,7 @@ describe("checkout con pago en línea", () => {
         await waitFor(() => {
             expect(Alert.alert).toHaveBeenCalledWith(
                 "Pedido registrado",
-                expect.stringMatching(/Todavía no encontramos/i),
+                expect.stringMatching(/Todavía no/i),
                 expect.any(Array)
             );
         });
@@ -501,7 +527,7 @@ describe("checkout con pago en línea", () => {
         mockCreate.mockResolvedValue({
             orderId: "o1",
             duplicate: false,
-            checkoutUrl: "https://www.mercadopago.com.mx/x"
+            checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_a1"
         });
 
         mockOpen.mockRejectedValue(new Error("sin navegador"));
@@ -511,7 +537,7 @@ describe("checkout con pago en línea", () => {
         await choose();
 
         fireEvent.press(
-            screen.getByLabelText("Pago en línea (Mercado Pago)")
+            screen.getByLabelText("Pago en línea (tarjeta)")
         );
 
         fireEvent.press(
@@ -559,6 +585,8 @@ describe("manejador de notificaciones", () => {
     beforeEach(() => {
         mockNotif.last.mockResolvedValue(null);
         mockNotif.listener = null;
+        mockNotif.tokenListener = null;
+        mockRefreshToken.mockClear();
     });
 
     const response = (data: any) => ({
@@ -585,6 +613,22 @@ describe("manejador de notificaciones", () => {
             pathname: "/order/[id]",
             params: { id: "64f1a2b3c4d5e6f7" }
         });
+    });
+
+    it("al tocar un aviso de pago también abre el pedido", async () => {
+        render(<NotificationHandler />);
+        await act(async () => {});
+        mockNotif.listener(response({ type: "order_status", orderId: "64f1a2b3c4d5e6f7", payment: "refunded" }));
+        expect(mockPush).toHaveBeenCalledWith({ pathname: "/order/[id]", params: { id: "64f1a2b3c4d5e6f7" } });
+    });
+
+    it("cuando FCM renueva el token lo reenvía para actualizar el destino y limpia el listener", async () => {
+        const { unmount } = render(<NotificationHandler />);
+        await act(async () => {});
+        mockNotif.tokenListener({ type: "android", data: "token-nuevo" });
+        expect(mockRefreshToken).toHaveBeenCalledWith("token-nuevo");
+        unmount();
+        expect(mockNotif.tokenRemove).toHaveBeenCalled();
     });
 
     it("si la app estaba cerrada abre el aviso pendiente", async () => {

@@ -1,5 +1,5 @@
 // Doble en memoria de node-appwrite para pruebas de humo. NO es Appwrite real.
-export const store = { orders: [], items: [], menu: [], cust: [], rel: [], events: [], users: [], labels: {}, names: {}, failItemAt: 0, failEvents: false };
+export const store = { orders: [], items: [], menu: [], cust: [], rel: [], events: [], users: [], labels: {}, names: {}, failItemAt: 0, failEvents: false, pushes: [], failPush: false };
 let tick = 0;
 const stamp = () => new Date(Date.UTC(2026, 0, 1, 0, 0, ++tick)).toISOString();
 let n = 0;
@@ -44,5 +44,12 @@ export class Users {
     const q = queries.find((x) => x.f === 'labels');
     const ids = Object.keys(store.labels).filter((id) => !q || store.labels[id].some((l) => q.v.includes(l)));
     return { users: ids.map((id) => ({ $id: id, name: store.names[id] ?? id })) };
+  }
+}
+// Appwrite Messaging: solo registra los envios (no hay FCM real).
+export class Messaging {
+  async createPush(params) {
+    if (store.failPush) throw new Error('messaging caido');
+    store.pushes.push(params); return { $id: params.messageId };
   }
 }
