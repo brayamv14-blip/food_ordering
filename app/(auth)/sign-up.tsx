@@ -4,24 +4,31 @@ import CustomInput from "@/components/CustomInput";
 import CustomButton from "@/components/CustomButton";
 import {useState} from "react";
 import {createUser} from "@/lib/appwrite";
+import useAuthStore from "@/store/auth.store";
+import {describeAuthError, validateSignUp} from "@/lib/domain/auth";
 
 const SignUp = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const { fetchAuthenticatedUser } = useAuthStore();
     const [form, setForm] = useState({ name: '', email: '', password: '' });
 
     const submit = async () => {
         const { name, email, password } = form;
 
-        if(!name || !email || !password) return Alert.alert('Error', 'Please enter valid email address & password.');
+        const problem = validateSignUp({ name, email: email.trim(), password });
+        if (problem) return Alert.alert('Revisa tus datos', problem);
 
         setIsSubmitting(true)
 
         try {
-            await createUser({ email,  password,  name });
+            await createUser({ email: email.trim(), password, name: name.trim() });
+
+            // Sin esto el guard de las pestañas no sabe que ya hay sesión y regresa a iniciar sesión.
+            await fetchAuthenticatedUser();
 
             router.replace('/');
         } catch(error: any) {
-            Alert.alert('Error', error.message);
+            Alert.alert('No se pudo crear la cuenta', describeAuthError(error));
         } finally {
             setIsSubmitting(false);
         }
@@ -30,38 +37,38 @@ const SignUp = () => {
     return (
         <View className="gap-10 bg-white rounded-lg p-5 mt-5">
             <CustomInput
-                placeholder="Enter your full name"
+                placeholder="Escribe tu nombre completo"
                 value={form.name}
                 onChangeText={(text) => setForm((prev) => ({ ...prev, name: text }))}
-                label="Full name"
+                label="Nombre completo"
             />
             <CustomInput
-                placeholder="Enter your email"
+                placeholder="Escribe tu correo"
                 value={form.email}
                 onChangeText={(text) => setForm((prev) => ({ ...prev, email: text }))}
-                label="Email"
+                label="Correo"
                 keyboardType="email-address"
             />
             <CustomInput
-                placeholder="Enter your password"
+                placeholder="Escribe tu contraseña (mínimo 8 caracteres)"
                 value={form.password}
                 onChangeText={(text) => setForm((prev) => ({ ...prev, password: text }))}
-                label="Password"
+                label="Contraseña"
                 secureTextEntry={true}
             />
 
             <CustomButton
-                title="Sign Up"
+                title="Crear cuenta"
                 isLoading={isSubmitting}
                 onPress={submit}
             />
 
             <View className="flex justify-center mt-5 flex-row gap-2">
                 <Text className="base-regular text-gray-100">
-                    Already have an account?
+                    ¿Ya tienes cuenta?
                 </Text>
                 <Link href="/sign-in" className="base-bold text-primary">
-                    Sign In
+                    Iniciar sesión
                 </Link>
             </View>
         </View>

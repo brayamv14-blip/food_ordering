@@ -42,31 +42,20 @@ export const appwriteConfig = {
     orderItemsCollectionId: "6ab7281f0039efe022c2",
 
     // Appwrite Functions (backend de confianza). Los IDs no son secretos.
+    // Solo existen DOS funciones: `create-order` y `update-order-status`; esta ultima
+    // atiende cambios de estado, ubicacion del repartidor y panel de personal (campo `action`).
     // Si no estan definidos, la app usa el modo directo SOLO PARA DESARROLLO.
+    // URL https (hostname registrado como plataforma Web en Appwrite) a la que apunta el
+    // correo de recuperacion; ver recovery-bridge/index.html.
+    recoveryUrl: process.env.EXPO_PUBLIC_RECOVERY_URL ?? "",
+
     functions: {
         createOrder: process.env.EXPO_PUBLIC_FN_CREATE_ORDER ?? "",
-        updateOrderStatus: process.env.EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS ?? "",
-        updateDriverLocation: process.env.EXPO_PUBLIC_FN_UPDATE_DRIVER_LOCATION ?? "",
-        staffApi: process.env.EXPO_PUBLIC_FN_STAFF_API ?? ""
+        updateOrderStatus: process.env.EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS ?? ""
     }
 };
 
 export const client = new Client();
-
-console.log(
-    "APPWRITE ENDPOINT:",
-    appwriteConfig.endpoint
-);
-
-console.log(
-    "APPWRITE PROJECT:",
-    appwriteConfig.projectId
-);
-
-console.log(
-    "APPWRITE PLATFORM:",
-    appwriteConfig.platform
-);
 
 client
     .setEndpoint(appwriteConfig.endpoint)
@@ -203,6 +192,31 @@ export const signIn = async ({
 
 
 // ======================================================
+// RECUPERACIÓN DE CONTRASEÑA
+// ======================================================
+
+export class RecoveryNotConfiguredError extends Error {
+    constructor() {
+        super("Falta configurar EXPO_PUBLIC_RECOVERY_URL en .env.local.");
+        this.name = "RecoveryNotConfiguredError";
+    }
+}
+
+/** Envia el correo de recuperacion. El enlace dura 1 hora (lo define Appwrite). */
+export const requestPasswordRecovery = async (email: string) => {
+    if (!appwriteConfig.recoveryUrl) throw new RecoveryNotConfiguredError();
+    return account.createRecovery({ email: email.trim(), url: appwriteConfig.recoveryUrl });
+};
+
+/** Completa la recuperacion con el userId y el secret recibidos en el enlace. */
+export const completePasswordRecovery = async (params: {
+    userId: string;
+    secret: string;
+    password: string;
+}) => account.updateRecovery(params);
+
+
+// ======================================================
 // CERRAR SESIÓN
 // ======================================================
 
@@ -215,52 +229,53 @@ export const signOut = async () => {
 // OBTENER USUARIO ACTUAL
 // ======================================================
 
-export const getCurrentUser = async () => {
-    try {
-        console.log(
-            "1. getCurrentUser iniciado"
-        );
+let currentUserInFlight: ReturnType<typeof loadCurrentUser> | null = null;
 
-        // Obtener cuenta de Appwrite
-        const currentAccount = await account.get();
+/** Llamadas simultaneas (layout, perfil, checkout) comparten una sola consulta. */
+export const getCurrentUser = () => {
+    if (!currentUserInFlight) {
+        currentUserInFlight = loadCurrentUser().finally(() => {
+            currentUserInFlight = null;
+        });
+    }
+    return currentUserInFlight;
+};
 
-        console.log(
-            "2. Cuenta obtenida:",
-            currentAccount.$id
-        );
+const loadCurrentUser = async () => {
+    // Lanza si no hay sesion; quien llama (auth store) lo trata como "sin sesion".
+    const currentAccount = await account.get();
 
-        // Buscar el usuario en la tabla users
-        const currentUser = await databases.listRows({
+    const findProfile = async () => {
+        const res = await databases.listRows({
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
-            queries: [
-                Query.equal(
-                    "accountId",
-                    currentAccount.$id
-                )
-            ]
+            queries: [Query.equal("accountId", currentAccount.$id)]
         });
+        return res.rows[0];
+    };
 
-        console.log(
-            "3. Usuarios encontrados:",
-            currentUser.rows.length
-        );
+    const existing = await findProfile();
+    if (existing) return existing;
 
-        if (currentUser.rows.length === 0) {
-            throw new Error(
-                "No se encontró el usuario en la tabla de usuarios"
-            );
-        }
-
-        return currentUser.rows[0];
-
-    } catch (error) {
-        console.log(
-            "ERROR EN getCurrentUser:",
-            error
-        );
-
-        throw error;
+    // La cuenta existe pero su fila de perfil no (p. ej. fallo de red justo despues
+    // de registrarse). Se crea una sola vez para no dejar al usuario sin acceso.
+    try {
+        return await databases.createRow({
+            databaseId: appwriteConfig.databaseId,
+            tableId: appwriteConfig.userCollectionId,
+            rowId: ID.unique(),
+            data: {
+                email: currentAccount.email,
+                name: currentAccount.name,
+                accountId: currentAccount.$id,
+                avatar: avatars.getInitialsURL(currentAccount.name || currentAccount.email)
+            }
+        });
+    } catch (e) {
+        // Otra peticion pudo crearla a la vez: se reutiliza.
+        const created = await findProfile();
+        if (created) return created;
+        throw e;
     }
 };
 
@@ -312,7 +327,8 @@ export const getMenu = async ({
             calories: row.calories as number,
             protein: row.protein as number,
             rating: row.rating as number,
-            categories: row.categories as string
+            categories: row.categories as string,
+            available: row.available !== false
         }));
 
     } catch (e) {
@@ -421,7 +437,6 @@ export const getProductCustomizations = async (
 
 export const getMyOrders = async (userId: string) => {
     try {
-        console.log("========== OBTENIENDO MIS PEDIDOS ==========");
 
         const orders = await databases.listRows({
             databaseId: appwriteConfig.databaseId,
@@ -474,6 +489,7 @@ export const getMyOrders = async (userId: string) => {
 export const cancelOrder = async (orderId: string) => {
     if (appwriteConfig.functions.updateOrderStatus) {
         return callBackendFunction(appwriteConfig.functions.updateOrderStatus, {
+            action: "updateStatus",
             orderId,
             status: "cancelled"
         });
@@ -510,9 +526,6 @@ export const updateUserProfile = async ({
     address2: string;
 }) => {
     try {
-        console.log("========== ACTUALIZANDO PERFIL ==========");
-        console.log("User ID:", userId);
-
         const updatedUser = await databases.updateRow({
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
@@ -525,15 +538,9 @@ export const updateUserProfile = async ({
             }
         });
 
-        console.log("PERFIL ACTUALIZADO:");
-        console.log(updatedUser);
-
         return updatedUser;
     } catch (error) {
-        console.log(
-            "========== ERROR ACTUALIZANDO PERFIL =========="
-        );
-        console.log(error);
+        console.log("Error al actualizar el perfil");
         throw error;
     }
 };

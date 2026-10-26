@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { ActivityIndicator, FlatList, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, FlatList, Text, TouchableOpacity, View } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -9,11 +9,15 @@ import { Order } from "@/lib/domain/order";
 import { isTrackable } from "@/lib/domain/orderStatus";
 import { formatMoney } from "@/lib/domain/pricing";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
+import { describePayment, describeProviderStatus } from "@/lib/domain/payment";
+import { openCheckout, syncPayment } from "@/lib/services/payments.service";
+import { reorderToCart } from "@/lib/services/reorder.service";
 
 const Orders = () => {
     const [orders, setOrders] = useState<Order[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [busyId, setBusyId] = useState<string | null>(null);
 
     const loadOrders = async () => {
         try {
@@ -27,6 +31,62 @@ const Orders = () => {
             setError("No pudimos cargar tus pedidos. Revisa tu conexión e inténtalo de nuevo.");
         } finally {
             setLoading(false);
+        }
+    };
+
+    const verifyPayment = async (order: Order) => {
+        const sync = await syncPayment(order.id);
+        Alert.alert(
+            sync.paymentStatus === "paid" ? "Pago confirmado" : "Pago no confirmado",
+            sync.paymentStatus === "paid" ? "Recibimos tu pago. Tu pedido seguirá su curso." : describeProviderStatus(sync.providerStatus)
+        );
+        await loadOrders();
+    };
+
+    // Paga (o reintenta pagar) un pedido en linea pendiente; despues el servidor verifica el pago.
+    const payNow = async (order: Order) => {
+        if (!order.paymentUrl || busyId) return;
+        setBusyId(order.id);
+        try {
+            await openCheckout(order.paymentUrl);
+            await verifyPayment(order);
+        } catch {
+            Alert.alert("Pago", "No pudimos completar la operación. Puedes intentarlo de nuevo desde aquí.");
+        } finally {
+            setBusyId(null);
+        }
+    };
+
+    const checkPayment = async (order: Order) => {
+        if (busyId) return;
+        setBusyId(order.id);
+        try {
+            await verifyPayment(order);
+        } catch {
+            Alert.alert("Pago", "No pudimos verificar el pago. Revisa tu conexión e inténtalo de nuevo.");
+        } finally {
+            setBusyId(null);
+        }
+    };
+
+    const reorder = async (order: Order) => {
+        if (busyId) return;
+        setBusyId(order.id);
+        try {
+            const { lines, skipped } = await reorderToCart(order);
+            const omitted = skipped.length ? `\n\nNo se agregaron: ${skipped.map((s) => `${s.name} (${s.reason})`).join(", ")}.` : "";
+            if (lines.length === 0) {
+                Alert.alert("Pedir de nuevo", `No se pudo agregar ningún producto.${omitted}`);
+                return;
+            }
+            Alert.alert("Pedir de nuevo", `Agregamos ${lines.length} producto(s) a tu carrito con los precios actuales.${omitted}`, [
+                { text: "Seguir aquí", style: "cancel" },
+                { text: "Ir al carrito", onPress: () => router.push("/cart") }
+            ]);
+        } catch {
+            Alert.alert("Pedir de nuevo", "No pudimos consultar el catálogo. Revisa tu conexión e inténtalo de nuevo.");
+        } finally {
+            setBusyId(null);
         }
     };
 
@@ -154,11 +214,53 @@ const Orders = () => {
                                 </View>
                             )}
 
+                            {(() => {
+                                const pay = describePayment(item.paymentMethod, item.paymentStatus, item.status);
+                                return (
+                                    <View className="mt-4">
+                                        <View className="flex-row items-center">
+                                            <Ionicons name={item.paymentMethod === "online" ? "card-outline" : "cash-outline"} size={18} color="#9CA3AF" />
+                                            <Text className={`ml-2 text-sm ${pay.tone === "ok" ? "text-green-600 font-semibold" : pay.tone === "warn" ? "text-orange-500 font-semibold" : "text-gray-400"}`}>
+                                                {pay.label}
+                                            </Text>
+                                        </View>
+                                        {pay.actionable && (
+                                            <View className="mt-3 flex-row">
+                                                {item.paymentUrl && (
+                                                    <TouchableOpacity
+                                                        onPress={() => payNow(item)}
+                                                        disabled={busyId === item.id}
+                                                        className="mr-2 rounded-xl bg-primary px-4 py-2"
+                                                        accessibilityRole="button"
+                                                    >
+                                                        <Text className="font-bold text-white">Pagar ahora</Text>
+                                                    </TouchableOpacity>
+                                                )}
+                                                <TouchableOpacity
+                                                    onPress={() => checkPayment(item)}
+                                                    disabled={busyId === item.id}
+                                                    className="rounded-xl border border-primary px-4 py-2"
+                                                    accessibilityRole="button"
+                                                >
+                                                    <Text className="font-bold text-primary">Verificar pago</Text>
+                                                </TouchableOpacity>
+                                            </View>
+                                        )}
+                                    </View>
+                                );
+                            })()}
+
                             <View className="mt-4 flex-row items-center justify-between">
-                                <View className="flex-row items-center">
-                                    <Ionicons name="cash-outline" size={18} color="#9CA3AF" />
-                                    <Text className="ml-2 text-sm text-gray-400">Efectivo contra entrega</Text>
-                                </View>
+                                <TouchableOpacity
+                                    onPress={() => reorder(item)}
+                                    disabled={busyId === item.id || item.items.length === 0}
+                                    className="flex-row items-center"
+                                    accessibilityRole="button"
+                                    accessibilityLabel={`Pedir de nuevo el pedido ${item.id.slice(-6)}`}
+                                >
+                                    {busyId === item.id ? <ActivityIndicator size="small" color="#FF9C01" /> : <Ionicons name="repeat-outline" size={18} color="#FF9C01" />}
+                                    <Text className="ml-1 text-sm font-semibold text-primary">Pedir de nuevo</Text>
+                                </TouchableOpacity>
                                 <View className="flex-row items-center">
                                     <Text className="mr-1 text-sm font-semibold text-primary">
                                         {isTrackable(item.status) ? "Seguir pedido" : "Ver detalle"}

@@ -5,6 +5,7 @@ import {
     Alert,
     Image,
     ScrollView,
+    Switch,
     Text,
     TouchableOpacity,
     View
@@ -18,11 +19,13 @@ import {
 } from "@/lib/appwrite";
 import useAuthStore from "@/store/auth.store";
 import { Roles, getMyRoles } from "@/lib/services/roles";
+import { registerForPush, unregisterPush } from "@/lib/services/notifications.service";
 
 const Profile = () => {
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [roles, setRoles] = useState<Roles>({ staff: false, driver: false });
+    const [pushBusy, setPushBusy] = useState(false);
 
     const loadProfile = async () => {
         try {
@@ -53,6 +56,32 @@ const Profile = () => {
             loadProfile();
         }, [])
     );
+
+    const pushOn = !!user?.pushToken;
+
+    const togglePush = async (enable: boolean) => {
+        if (!user || pushBusy) return;
+        setPushBusy(true);
+        try {
+            if (!enable) {
+                await unregisterPush(user.$id);
+                setUser({ ...user, pushToken: null });
+                return;
+            }
+            const r = await registerForPush(user.$id);
+            if (r.status === "registered") {
+                setUser({ ...user, pushToken: r.token });
+            } else if (r.status === "denied") {
+                Alert.alert("Notificaciones", "Para avisarte de tus pedidos necesitamos el permiso de notificaciones. Puedes activarlo en los ajustes del teléfono.");
+            } else if (r.status === "not_configured") {
+                Alert.alert("Notificaciones", "Falta configurar el proyecto de notificaciones (EAS). Consulta PATCH-LEEME.md.");
+            } else {
+                Alert.alert("Notificaciones", "No se pudieron activar en este dispositivo. Inténtalo de nuevo más tarde.");
+            }
+        } finally {
+            setPushBusy(false);
+        }
+    };
 
     if (loading) {
         return (
@@ -332,6 +361,25 @@ const Profile = () => {
                     />
                 </TouchableOpacity>
 
+                {/* NOTIFICACIONES DE PEDIDOS (opt-in) */}
+                <View className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+                    <View className="flex-1 flex-row items-center pr-3">
+                        <View className="h-11 w-11 items-center justify-center rounded-full bg-orange-50">
+                            <Ionicons name="notifications-outline" size={22} color="#FF9C01" />
+                        </View>
+                        <View className="ml-3 flex-1">
+                            <Text className="text-base font-bold text-dark-100">Notificaciones de pedidos</Text>
+                            <Text className="text-xs text-gray-400">Te avisamos cuando cambie el estado de tu pedido.</Text>
+                        </View>
+                    </View>
+                    <Switch
+                        value={pushOn}
+                        onValueChange={togglePush}
+                        disabled={pushBusy}
+                        accessibilityLabel="Activar notificaciones de pedidos"
+                    />
+                </View>
+
                 {/* ACCESOS POR ROL (la autorización real está en el servidor) */}
                 {roles.staff && (
                     <TouchableOpacity
@@ -381,6 +429,8 @@ const Profile = () => {
                                     style: "destructive",
                                     onPress: async () => {
                                         try {
+                                            // Este dispositivo deja de recibir avisos de la cuenta que se cierra.
+                                            if (user?.pushToken) await unregisterPush(user.$id);
                                             await signOut();
                                         } catch (e) {
                                             console.log("Error al cerrar sesión:", e);

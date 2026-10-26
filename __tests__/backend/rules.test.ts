@@ -61,25 +61,18 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(rules.TRANSITIONS).toEqual(JSON.parse(JSON.stringify(ALLOWED_TRANSITIONS)));
     });
 
+    it("solo existen las dos funciones permitidas", () => {
+        const root = path.join(__dirname, "../../appwrite-functions");
+        const dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, "src/main.js"))).map((d) => d.name).sort();
+        expect(dirs).toEqual(["create-order", "update-order-status"]);
+    });
+
     it("las copias de rules.js dentro de cada función están sincronizadas", () => {
         const root = path.join(__dirname, "../../appwrite-functions");
-      const normalize = (content: string) =>
-    content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-
-const shared = normalize(
-    fs.readFileSync(path.join(root, "shared/rules.js"), "utf8")
-);
-
-const expected = normalize(
-    shared.replace(
-        /module\.exports = \{([\s\S]*?)\};\s*$/,
-        "export {$1};\n"
-    )
-);
-        for (const fn of ["create-order", "update-order-status", "update-driver-location", "staff-api"]) {
-           const copy = normalize(
-    fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8")
-);
+        const shared = fs.readFileSync(path.join(root, "shared/rules.js"), "utf8");
+        const expected = shared.replace(/module\.exports = \{([\s\S]*?)\};\s*$/, "export {$1};\n");
+        for (const fn of ["create-order", "update-order-status"]) {
+            const copy = fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8");
             expect(copy.endsWith(expected)).toBe(true);
         }
     });
@@ -121,5 +114,107 @@ const expected = normalize(
         const view = rules.toStaffOrderView({ $id: "o1", userId: "secreto", status: "pending", total: 5 }, [{ name: "X", quantity: 2, price: 9 }]);
         expect(view).not.toHaveProperty("userId");
         expect(view.items).toEqual([{ name: "X", quantity: 2 }]);
+    });
+
+    it("rechaza productos no disponibles y cantidades manipuladas", () => {
+        const m = { ...menu, m9: { $id: "m9", name: "Agotado", price: 5, available: false } };
+        expect(rules.priceOrder({ items: [{ menuId: "m9", quantity: 1 }], menuById: m, extrasById: extras })).toMatchObject({ ok: false, code: "unavailable" });
+        expect(rules.priceOrder({ items: [{ menuId: "m1", quantity: -1 }], menuById: m, extrasById: extras }).code).toBe("bad_quantity");
+        expect(rules.priceOrder({ items: [{ menuId: "m1", quantity: 51 }], menuById: m, extrasById: extras }).code).toBe("bad_quantity");
+        expect(rules.priceOrder({ items: [{ menuId: "m1", quantity: "2" }], menuById: m, extrasById: extras }).code).toBe("bad_quantity");
+        expect(rules.isMenuAvailable({ available: false })).toBe(false);
+        expect(rules.isMenuAvailable({ available: true })).toBe(true);
+        expect(rules.isMenuAvailable({})).toBe(true);
+        expect(rules.isMenuAvailable(undefined)).toBe(true);
+    });
+
+    it("detecta pedidos modificados por otra persona (concurrencia optimista)", () => {
+        const order = { status: "pending", $updatedAt: "T1" };
+        expect(rules.checkExpected(order, {}).ok).toBe(true);
+        expect(rules.checkExpected(order, { expectedStatus: "pending", expectedUpdatedAt: "T1" }).ok).toBe(true);
+        expect(rules.checkExpected(order, { expectedStatus: "confirmed" })).toMatchObject({ ok: false, code: "stale_order" });
+        expect(rules.checkExpected(order, { expectedUpdatedAt: "T0" })).toMatchObject({ ok: false, code: "stale_order" });
+        expect(rules.checkExpected(order)).toEqual({ ok: true });
+    });
+
+    it("valida rangos de fecha y búsqueda por id", () => {
+        expect(rules.parseDateRange({})).toEqual({ ok: true });
+        expect(rules.parseDateRange({ from: "2026-01-01T00:00:00Z" })).toEqual({ ok: true, from: "2026-01-01T00:00:00.000Z" });
+        expect(rules.parseDateRange({ from: "basura" }).code).toBe("bad_date");
+        expect(rules.parseDateRange({ from: 5 }).code).toBe("bad_date");
+        expect(rules.parseDateRange({ from: "2026-02-01", to: "2026-01-01" }).code).toBe("bad_date");
+        expect(rules.matchesOrderQuery("abcdef123456", "#123456")).toBe(true);
+        expect(rules.matchesOrderQuery("abcdef123456", "ABCDEF123456")).toBe(true);
+        expect(rules.matchesOrderQuery("abcdef123456", "12")).toBe(false);
+        expect(rules.matchesOrderQuery("abcdef123456", "")).toBe(false);
+        expect(rules.matchesOrderQuery("abcdef123456", undefined)).toBe(false);
+    });
+
+    it("arma eventos de historial sin datos sensibles", () => {
+        const ev = rules.buildOrderEvent({ orderId: "o1", type: "status", from: "pending", to: "confirmed", actorId: "u1", actorRole: "staff" });
+        expect(ev).toEqual({ orderId: "o1", type: "status", fromStatus: "pending", toStatus: "confirmed", actorId: "u1", actorRole: "staff", driverUserId: null });
+        expect(Object.keys(ev)).not.toEqual(expect.arrayContaining(["customerPhone", "deliveryAddress"]));
+    });
+
+    describe("pago en línea", () => {
+        const base = { isOwner: true, from: "pending" as const };
+        it("valida el método de pago", () => {
+            expect(rules.validatePaymentMethod(undefined)).toEqual({ ok: true, method: "cash_on_delivery" });
+            expect(rules.validatePaymentMethod("online")).toEqual({ ok: true, method: "online" });
+            expect(rules.validatePaymentMethod("cash_on_delivery").ok).toBe(true);
+            for (const bad of ["bitcoin", "", 5, {}, "ONLINE"]) expect(rules.validatePaymentMethod(bad)).toMatchObject({ ok: false, code: "bad_payment_method" });
+        });
+        it("no confirma un pedido en línea hasta que el pago esté verificado", () => {
+            const online = (status: any) => ({ method: "online", status });
+            expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed", payment: online("pending") })).toMatchObject({ ok: false, code: "payment_required" });
+            expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed", payment: online(null) }).code).toBe("payment_required");
+            expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed", payment: online("paid") }).ok).toBe(true);
+            expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed", payment: { method: "cash_on_delivery", status: "not_required" } }).ok).toBe(true);
+            expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed" }).ok).toBe(true);
+        });
+        it("el cliente no cancela por su cuenta un pedido pagado (reembolso fuera de la app)", () => {
+            expect(rules.canActorTransition({ actor: "customer", ...base, to: "cancelled", payment: { method: "online", status: "paid" } })).toMatchObject({ ok: false, code: "refund_needed" });
+            expect(rules.canActorTransition({ actor: "customer", ...base, to: "cancelled", payment: { method: "online", status: "pending" } }).ok).toBe(true);
+            expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "cancelled", payment: { method: "online", status: "paid" } }).ok).toBe(true);
+        });
+        it("arma la preferencia con el total del servidor", () => {
+            const b = rules.buildPreferenceBody({ orderId: "abc123456789", total: 28.5, returnUrl: "https://x.io/p.html" });
+            expect(b).toMatchObject({ external_reference: "abc123456789", auto_return: "approved", back_urls: { success: "https://x.io/p.html" } });
+            expect(b.items).toEqual([{ id: "abc123456789", title: "Pedido Delivery #456789", quantity: 1, unit_price: 28.5, currency_id: "MXN" }]);
+        });
+        it("solo acepta un pago aprobado con importe y moneda exactos", () => {
+            const pay = (o: any) => ({ id: 1, status: "approved", transaction_amount: 28.5, currency_id: "MXN", ...o });
+            expect(rules.pickApprovedPayment([pay({})], { total: 28.5 })).toMatchObject({ id: 1 });
+            expect(rules.pickApprovedPayment([pay({ transaction_amount: 28.49 })], { total: 28.5 })).toBeNull();
+            expect(rules.pickApprovedPayment([pay({ status: "pending" }), pay({ status: "rejected" })], { total: 28.5 })).toBeNull();
+            expect(rules.pickApprovedPayment([pay({ currency_id: "USD" })], { total: 28.5 })).toBeNull();
+            expect(rules.pickApprovedPayment([pay({ transaction_amount: 0.1 + 0.2 })], { total: 0.3 })).not.toBeNull(); // sin error de flotantes
+            expect(rules.pickApprovedPayment(undefined, { total: 1 })).toBeNull();
+            expect(rules.pickApprovedPayment([null, 5], { total: 1 })).toBeNull();
+            expect(rules.latestPaymentStatus([{ status: "rejected", date_created: "2026-01-01" }, { status: "pending", date_created: "2026-02-01" }])).toBe("pending");
+            expect(rules.latestPaymentStatus([])).toBeNull();
+        });
+    });
+
+    describe("notificaciones push", () => {
+        it("reconoce tokens de Expo y rechaza basura", () => {
+            expect(rules.isExpoPushToken("ExponentPushToken[abcdefghijklmnopqrstuv]")).toBe(true);
+            expect(rules.isExpoPushToken("ExpoPushToken[abcdefghij_klm-n]")).toBe(true);
+            for (const bad of ["", "abc", "ExponentPushToken[]", "ExponentPushToken[<script>alert(1)</script>]", null, undefined, 5]) expect(rules.isExpoPushToken(bad)).toBe(false);
+        });
+        it("el mensaje al cliente no incluye datos personales", () => {
+            const n = rules.buildStatusNotification("on_the_way", "ord123456");
+            expect(n).toMatchObject({ title: "¡Tu pedido va en camino!", data: { orderId: "ord123456", status: "on_the_way" } });
+            expect(JSON.stringify(n)).not.toMatch(/direcci|tel[eé]fono|\d{10}/i);
+            expect(rules.buildStatusNotification("pending", "o")).toBeNull();
+            expect(rules.buildStatusNotification("raro", "o")).toBeNull();
+            expect(rules.buildAssignmentNotification("abcdef123456").body).toContain("#123456");
+        });
+        it("detecta qué tokens purgar según la respuesta de Expo", () => {
+            const resp = { data: [{ status: "ok" }, { status: "error", details: { error: "DeviceNotRegistered" } }, { status: "error", details: { error: "MessageTooBig" } }] };
+            expect(rules.tokensToPurge(resp, ["a", "b", "c"])).toEqual(["b"]);
+            expect(rules.tokensToPurge(null, ["a"])).toEqual([]);
+            expect(rules.tokensToPurge({ data: "x" }, ["a"])).toEqual([]);
+        });
     });
 });

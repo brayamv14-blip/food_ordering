@@ -37,13 +37,15 @@ export interface CreateOrderInput {
     contact: { name: string; phone: string };
     /** Identificador de intento: el mismo valor en reintentos evita duplicados. */
     clientRequestId: string;
-    paymentMethod?: string;
+    paymentMethod?: "cash_on_delivery" | "online";
 }
 
 export interface CreateOrderResult {
     orderId: string;
     /** true si el pedido ya existia (reintento de un intento previo exitoso). */
     duplicate: boolean;
+    /** Enlace de pago en linea (solo con paymentMethod = online). */
+    checkoutUrl?: string;
 }
 
 /** Identificador de intento de checkout (no criptografico; sirve de llave de idempotencia). */
@@ -84,6 +86,11 @@ export async function createOrderIdempotent(
     }
     const address = addressCheck.values;
 
+    if ((input.paymentMethod ?? "cash_on_delivery") === "online" && !appwriteConfig.functions.createOrder) {
+        // El cobro en linea necesita el servidor: en modo desarrollo no se ofrece.
+        throw new OrderServiceError("payment_unavailable", "El pago en línea no está disponible en este modo.");
+    }
+
     const orderItems = input.items.map((item) => ({
         menuId: item.id,
         name: item.name,
@@ -95,7 +102,7 @@ export async function createOrderIdempotent(
 
     // ---- Modo seguro: backend de confianza --------------------------------
     if (appwriteConfig.functions.createOrder) {
-        const result = await callBackendFunction<{ orderId: string; duplicate?: boolean }>(
+        const result = await callBackendFunction<{ orderId: string; duplicate?: boolean; checkoutUrl?: string }>(
             appwriteConfig.functions.createOrder,
             {
                 clientRequestId: input.clientRequestId,
@@ -112,7 +119,11 @@ export async function createOrderIdempotent(
         if (!result?.orderId) {
             throw new OrderServiceError("bad_response", "Respuesta incompleta del servidor.");
         }
-        return { orderId: result.orderId, duplicate: !!result.duplicate };
+        return {
+            orderId: result.orderId,
+            duplicate: !!result.duplicate,
+            ...(typeof result.checkoutUrl === "string" ? { checkoutUrl: result.checkoutUrl } : {})
+        };
     }
 
     // ---- Modo desarrollo: escritura directa --------------------------------
@@ -133,6 +144,7 @@ export async function createOrderIdempotent(
                 deliveryFee: totals.deliveryFee,
                 discount: totals.discount,
                 paymentMethod: input.paymentMethod ?? "cash_on_delivery",
+                paymentStatus: "not_required",
                 clientRequestId: input.clientRequestId,
                 customerName: input.contact.name,
                 customerPhone: input.contact.phone,

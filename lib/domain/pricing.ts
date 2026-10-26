@@ -3,6 +3,12 @@
  * punto flotante (por ejemplo 0.1 + 0.2).
  */
 
+/** Maximo por linea del carrito; el servidor aplica el mismo limite. */
+export const MAX_ITEM_QUANTITY = 50;
+
+export const isValidMoney = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+
 export const DEFAULT_DELIVERY_FEE = 5;
 /** Descuento fijo heredado del Sprint 1. El backend lo recalcula. */
 export const DEFAULT_DISCOUNT = 0.5;

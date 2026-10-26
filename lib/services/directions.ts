@@ -3,7 +3,7 @@ import { decodePolyline } from "@/lib/domain/polyline";
 
 export type RouteResult =
     | { ok: true; points: LatLng[]; distanceMeters: number | null; durationSeconds: number | null }
-    | { ok: false; reason: "not_configured" | "no_route" | "denied" | "network" };
+    | { ok: false; reason: "not_configured" | "no_route" | "denied" | "quota" | "network" };
 
 /** Clave opcional de Google Directions API. Es publica en el cliente: restringela. */
 export const directionsKey = (): string => process.env.EXPO_PUBLIC_GOOGLE_DIRECTIONS_API_KEY ?? "";
@@ -32,7 +32,10 @@ export async function fetchRoute(
         const res = await fetchImpl(url);
         if (!res.ok) return { ok: false, reason: "network" };
         const data: any = await res.json();
-        if (data?.status === "REQUEST_DENIED" || data?.status === "OVER_QUERY_LIMIT") {
+        if (data?.status === "OVER_QUERY_LIMIT" || data?.status === "OVER_DAILY_LIMIT") {
+            return { ok: false, reason: "quota" };
+        }
+        if (data?.status === "REQUEST_DENIED") {
             return { ok: false, reason: "denied" };
         }
         if (data?.status !== "OK") return { ok: false, reason: "no_route" };

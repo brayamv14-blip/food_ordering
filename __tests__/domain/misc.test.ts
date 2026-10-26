@@ -80,3 +80,22 @@ describe("privacidad en Sentry", () => {
         expect(() => scrubEvent({} as any)).not.toThrow();
     });
 });
+
+import { dateRangeFor, isOrderQueryTooShort, normalizeOrderQuery } from "@/lib/domain/orderFilters";
+
+describe("filtros de pedidos", () => {
+    it("calcula el inicio de 'hoy' y de 'últimos 7 días' en hora local", () => {
+        const now = new Date(2026, 9, 21, 15, 30); // 21/oct/2026 15:30 local
+        expect(dateRangeFor("all", now)).toEqual({});
+        expect(new Date(dateRangeFor("today", now).from!).getTime()).toBe(new Date(2026, 9, 21, 0, 0, 0, 0).getTime());
+        expect(new Date(dateRangeFor("week", now).from!).getTime()).toBe(new Date(2026, 9, 15, 0, 0, 0, 0).getTime());
+    });
+    it("normaliza la búsqueda por identificador", () => {
+        expect(normalizeOrderQuery(" #ab12cd ")).toBe("ab12cd");
+        expect(normalizeOrderQuery("abc")).toBeUndefined();
+        expect(normalizeOrderQuery("")).toBeUndefined();
+        expect(isOrderQueryTooShort("ab")).toBe(true);
+        expect(isOrderQueryTooShort("")).toBe(false);
+        expect(isOrderQueryTooShort("abcd")).toBe(false);
+    });
+});

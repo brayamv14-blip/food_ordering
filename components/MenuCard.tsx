@@ -5,7 +5,7 @@ import { useCartStore } from "@/store/cart.store";
 import { router } from "expo-router";
 
 const MenuCard = ({
-    item: { $id, image_url, name, price }
+    item: { $id, image_url, name, price, available }
 }: {
     item: MenuItem
 }) => {
@@ -15,7 +15,10 @@ const MenuCard = ({
     router.push(`/product/${$id}` as any);
 };
  
+    const soldOut = available === false;
+
     const handleAddToCart = () => {
+        if (soldOut) return;
         addItem({
             id: $id,
             name,
@@ -42,6 +45,7 @@ const MenuCard = ({
             <Image
                 source={{ uri: image_url }}
                 className="size-32 absolute -top-10"
+                style={soldOut ? { opacity: 0.4 } : undefined}
                 resizeMode="contain"
             />
 
@@ -56,14 +60,21 @@ const MenuCard = ({
                 From ${price}
             </Text>
 
-            <TouchableOpacity
-                onPress={handleAddToCart}
-                activeOpacity={0.7}
-            >
-                <Text className="paragraph-bold text-primary">
-                    Add to Cart +
+            {soldOut ? (
+                <Text className="paragraph-bold text-gray-200" accessibilityLabel={`${name} no disponible`}>
+                    No disponible
                 </Text>
-            </TouchableOpacity>
+            ) : (
+                <TouchableOpacity
+                    onPress={handleAddToCart}
+                    activeOpacity={0.7}
+                    accessibilityLabel={`Agregar ${name} al carrito`}
+                >
+                    <Text className="paragraph-bold text-primary">
+                        Add to Cart +
+                    </Text>
+                </TouchableOpacity>
+            )}
         </TouchableOpacity>
     );
 };

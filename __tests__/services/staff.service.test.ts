@@ -1,5 +1,5 @@
 const mockCall = jest.fn();
-const mockConfig = { functions: { staffApi: "fnStaff", updateOrderStatus: "fnStatus", createOrder: "", updateDriverLocation: "" } };
+const mockConfig = { functions: { updateOrderStatus: "fnOps", createOrder: "" } };
 const mockAccount = { get: jest.fn() };
 jest.mock("@/lib/appwrite", () => ({
     __esModule: true,
@@ -10,10 +10,10 @@ jest.mock("@/lib/appwrite", () => ({
 
 import { rolesFromLabels, getMyRoles } from "@/lib/services/roles";
 import {
-    BackendNotConfiguredError, assignDriver, changeOrderStatus, describeBackendError, listDrivers, listMyDeliveries, listStaffOrders
+    BackendNotConfiguredError, assignDriver, changeOrderStatus, describeBackendError, getOrderHistory, isStaleOrderError, listDrivers, listMyDeliveries, listStaffOrders, sendDriverLocation
 } from "@/lib/services/staff.service";
 
-beforeEach(() => { jest.clearAllMocks(); mockConfig.functions.staffApi = "fnStaff"; mockConfig.functions.updateOrderStatus = "fnStatus"; });
+beforeEach(() => { jest.clearAllMocks(); mockConfig.functions.updateOrderStatus = "fnOps"; });
 
 describe("roles", () => {
     it("interpreta las etiquetas de la cuenta", () => {
@@ -30,33 +30,46 @@ describe("roles", () => {
     });
 });
 
-describe("servicio de personal", () => {
-    it("lista pedidos con filtro opcional y tolera respuestas incompletas", async () => {
+describe("servicio de personal (una sola función con campo action)", () => {
+    it("lista pedidos con filtros, descarta vacíos y tolera respuestas incompletas", async () => {
         mockCall.mockResolvedValue({ orders: [{ id: "o1" }] });
-        expect(await listStaffOrders("preparing")).toEqual([{ id: "o1" }]);
-        expect(mockCall).toHaveBeenCalledWith("fnStaff", { action: "listOrders", status: "preparing" });
+        expect(await listStaffOrders({ status: "preparing", from: "2026-10-01T00:00:00Z", query: "", to: undefined })).toEqual([{ id: "o1" }]);
+        expect(mockCall).toHaveBeenCalledWith("fnOps", { action: "listOrders", status: "preparing", from: "2026-10-01T00:00:00Z" });
         mockCall.mockResolvedValue({});
         expect(await listStaffOrders()).toEqual([]);
-        expect(mockCall).toHaveBeenLastCalledWith("fnStaff", { action: "listOrders" });
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "listOrders" });
         mockCall.mockResolvedValue(null);
         expect(await listDrivers()).toEqual([]);
         expect(await listMyDeliveries()).toEqual([]);
+        expect(await getOrderHistory("o1")).toEqual({ enabled: false, events: [] });
     });
-    it("asigna repartidor y cambia estado enviando solo ids", async () => {
+    it("asigna repartidor y cambia estado enviando solo ids y lo que el usuario vio", async () => {
         mockCall.mockResolvedValue({});
-        await assignDriver("o1", "d1");
-        expect(mockCall).toHaveBeenCalledWith("fnStaff", { action: "assignDriver", orderId: "o1", driverUserId: "d1" });
+        await assignDriver("o1", "d1", { expectedStatus: "preparing", expectedUpdatedAt: "T1" });
+        expect(mockCall).toHaveBeenCalledWith("fnOps", { action: "assignDriver", orderId: "o1", driverUserId: "d1", expectedStatus: "preparing", expectedUpdatedAt: "T1" });
         await changeOrderStatus("o1", "confirmed");
-        expect(mockCall).toHaveBeenCalledWith("fnStatus", { orderId: "o1", status: "confirmed" });
+        expect(mockCall).toHaveBeenCalledWith("fnOps", { action: "updateStatus", orderId: "o1", status: "confirmed" });
     });
-    it("sin funciones configuradas falla con un mensaje claro y sin llamar al servidor", async () => {
-        mockConfig.functions.staffApi = "";
+    it("envía la ubicación del repartidor con la misma función", async () => {
+        mockCall.mockResolvedValue({ ok: true });
+        await sendDriverLocation("o1", 19.5, -99.2);
+        expect(mockCall).toHaveBeenCalledWith("fnOps", { action: "updateLocation", orderId: "o1", latitude: 19.5, longitude: -99.2 });
+    });
+    it("devuelve el historial", async () => {
+        mockCall.mockResolvedValue({ enabled: true, events: [{ type: "created" }] });
+        expect(await getOrderHistory("o1")).toEqual({ enabled: true, events: [{ type: "created" }] });
+    });
+    it("sin función configurada falla con mensaje claro y sin llamar al servidor", async () => {
         mockConfig.functions.updateOrderStatus = "";
         await expect(listStaffOrders()).rejects.toBeInstanceOf(BackendNotConfiguredError);
         await expect(changeOrderStatus("o1", "confirmed")).rejects.toThrow("EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS");
+        await expect(sendDriverLocation("o1", 1, 2)).rejects.toBeInstanceOf(BackendNotConfiguredError);
         expect(mockCall).not.toHaveBeenCalled();
     });
-    it("traduce errores: el mensaje del servidor se muestra, los de red se resumen", () => {
+    it("reconoce el conflicto de edición y traduce errores", () => {
+        expect(isStaleOrderError(Object.assign(new Error("x"), { code: "stale_order" }))).toBe(true);
+        expect(isStaleOrderError(new Error("x"))).toBe(false);
+        expect(isStaleOrderError(undefined)).toBe(false);
         expect(describeBackendError(new Error("Solo personal autorizado."))).toBe("Solo personal autorizado.");
         expect(describeBackendError(new Error("Network request failed"))).toMatch(/conexión/);
         expect(describeBackendError(undefined)).toMatch(/conexión/);

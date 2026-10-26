@@ -31,6 +31,9 @@ import {
     normalizePhone
 } from "@/lib/domain/address";
 import { computeOrderTotals, unitPrice, formatMoney } from "@/lib/domain/pricing";
+import { findUnavailableItems } from "@/lib/services/catalog.service";
+import { PAYMENT_LABELS, PaymentMethod, describeProviderStatus } from "@/lib/domain/payment";
+import { isOnlinePaymentEnabled, openCheckout, syncPayment } from "@/lib/services/payments.service";
 
 type AddressChoice = "home" | "work" | "manual";
 
@@ -49,6 +52,8 @@ const Checkout = () => {
     const [choice, setChoice] = useState<AddressChoice>("home");
     const [manualAddress, setManualAddress] = useState("");
     const [phone, setPhone] = useState("");
+    const [payment, setPayment] = useState<PaymentMethod>("cash_on_delivery");
+    const onlineAvailable = isOnlinePaymentEnabled();
 
     // Un solo identificador por intento: los reintentos lo reutilizan y el
     // servicio devuelve el pedido ya creado en lugar de duplicarlo.
@@ -118,17 +123,45 @@ const Checkout = () => {
         submittingRef.current = true;
         setLoading(true);
         try {
+            // Avisa antes de enviar si algun producto se agoto o ya no existe.
+            const unavailable = await findUnavailableItems(items);
+            if (unavailable && unavailable.length > 0) {
+                Alert.alert(
+                    "Productos no disponibles",
+                    `Estos productos ya no están disponibles: ${unavailable.join(", ")}. Quítalos del carrito para continuar.`
+                );
+                return;
+            }
+
             const result = await createOrderIdempotent({
                 userId: profile.accountId,
                 items,
                 address: addressCheck.values,
                 contact: { name: profile.name, phone: normalizePhone(phone) },
-                clientRequestId: requestIdRef.current
+                clientRequestId: requestIdRef.current,
+                paymentMethod: payment
             });
 
             // Solo aquí el pedido y sus artículos están guardados.
             clearCart();
             requestIdRef.current = newClientRequestId();
+
+            if (result.checkoutUrl) {
+                // Pago en linea: el pedido ya existe (pendiente de pago). Se abre Mercado Pago y,
+                // al volver, el SERVIDOR verifica el pago; la app nunca da un pedido por pagado.
+                let message = "Tu pedido quedó registrado. Puedes pagarlo o verificar el pago en Mis pedidos.";
+                try {
+                    await openCheckout(result.checkoutUrl);
+                    const sync = await syncPayment(result.orderId);
+                    message = sync.paymentStatus === "paid" ? "¡Pago confirmado! Tu pedido ya está en proceso." : describeProviderStatus(sync.providerStatus);
+                } catch {
+                    /* se conserva el mensaje por omision */
+                }
+                Alert.alert("Pedido registrado", message, [
+                    { text: "Ver pedido", onPress: () => router.replace({ pathname: "/order/[id]", params: { id: result.orderId } }) }
+                ]);
+                return;
+            }
 
             Alert.alert(
                 "Pedido confirmado",
@@ -271,16 +304,28 @@ const Checkout = () => {
                 {/* Pago */}
                 <View className="px-5 mt-8">
                     <Text className="h3-bold text-dark-100 mb-4">Método de pago</Text>
-                    <View className="border border-gray-200 rounded-2xl p-5 flex-row items-center">
-                        <Ionicons name="cash-outline" size={24} color="#FE8C00" />
-                        <View className="ml-3 flex-1">
-                            <Text className="base-bold text-dark-100">Efectivo contra entrega</Text>
-                            <Text className="small-regular text-gray-200 mt-1">Pagas cuando llegue tu pedido</Text>
-                        </View>
-                        <View className="size-6 rounded-full bg-primary items-center justify-center">
-                            <Ionicons name="checkmark" size={16} color="#FFFFFF" />
-                        </View>
-                    </View>
+                    {(["cash_on_delivery", ...(onlineAvailable ? ["online"] : [])] as PaymentMethod[]).map((m) => (
+                        <TouchableOpacity
+                            key={m}
+                            onPress={() => setPayment(m)}
+                            activeOpacity={0.8}
+                            className={`mb-3 border rounded-2xl p-5 flex-row items-center ${payment === m ? "border-primary" : "border-gray-200"}`}
+                            accessibilityRole="radio"
+                            accessibilityState={{ selected: payment === m }}
+                            accessibilityLabel={PAYMENT_LABELS[m]}
+                        >
+                            <Ionicons name={m === "online" ? "card-outline" : "cash-outline"} size={24} color="#FE8C00" />
+                            <View className="ml-3 flex-1">
+                                <Text className="base-bold text-dark-100">{PAYMENT_LABELS[m]}</Text>
+                                <Text className="small-regular text-gray-200 mt-1">
+                                    {m === "online" ? "Pagas ahora de forma segura; el pedido se confirma al verificarse el pago" : "Pagas cuando llegue tu pedido"}
+                                </Text>
+                            </View>
+                            <View className={`size-6 rounded-full items-center justify-center ${payment === m ? "bg-primary" : "border border-gray-200"}`}>
+                                {payment === m && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
+                            </View>
+                        </TouchableOpacity>
+                    ))}
                 </View>
 
                 <View className="px-5 mt-8">
@@ -295,7 +340,7 @@ const Checkout = () => {
                             <ActivityIndicator color="#FFFFFF" />
                         ) : (
                             <Text className="text-white text-center paragraph-bold">
-                                Confirmar pedido - {formatMoney(totals.total)}
+                                {payment === "online" ? "Pagar y confirmar" : "Confirmar pedido"} - {formatMoney(totals.total)}
                             </Text>
                         )}
                     </TouchableOpacity>

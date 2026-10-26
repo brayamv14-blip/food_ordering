@@ -16,6 +16,9 @@ jest.mock("@/lib/services/orders.service", () => {
     return { OrderServiceError, createOrderIdempotent: (...a: any[]) => mockCreate(...a), newClientRequestId: () => "chk_fixed0001" };
 });
 
+const mockUnavailable = jest.fn();
+jest.mock("@/lib/services/catalog.service", () => ({ findUnavailableItems: (...a: any[]) => mockUnavailable(...a) }));
+
 import Checkout from "@/app/checkout";
 import { useCartStore } from "@/store/cart.store";
 
@@ -24,6 +27,7 @@ const profileRow = { $id: "row1", accountId: "acc1", name: "Bryan", email: "b@c.
 beforeEach(() => {
     jest.clearAllMocks();
     mockGetUser.mockResolvedValue(profileRow);
+    mockUnavailable.mockResolvedValue([]);
     useCartStore.setState({ items: [{ id: "m1", name: "Burger", price: 10, image_url: "x", quantity: 2, customizations: [] }] });
     jest.spyOn(Alert, "alert").mockImplementation(() => {});
 });
@@ -71,6 +75,9 @@ describe("checkout", () => {
         fireEvent.press(button);
         fireEvent.press(button);
         fireEvent.press(button);
+        // La comprobación de disponibilidad es asíncrona: se espera a que llegue la primera llamada.
+        await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+        fireEvent.press(button);
         expect(mockCreate).toHaveBeenCalledTimes(1);
         resolve({ orderId: "o1", duplicate: false });
         await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
@@ -82,5 +89,31 @@ describe("checkout", () => {
         await waitFor(() => expect(mockGetUser).toHaveBeenCalled());
         fireEvent.press(screen.getByRole("button", { name: /Confirmar pedido/ }));
         expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("no envía el pedido si un producto del carrito ya no está disponible", async () => {
+        mockUnavailable.mockResolvedValue(["Burger"]);
+        render(<Checkout />);
+        await pressConfirm();
+        await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith("Productos no disponibles", expect.stringContaining("Burger")));
+        expect(mockCreate).not.toHaveBeenCalled();
+        expect(useCartStore.getState().items).toHaveLength(1);
+    });
+
+    it("si no se puede comprobar la disponibilidad, deja que el servidor decida", async () => {
+        mockUnavailable.mockResolvedValue(null);
+        mockCreate.mockResolvedValue({ orderId: "o1", duplicate: false });
+        render(<Checkout />);
+        await pressConfirm();
+        await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    });
+
+    it("el servidor puede rechazar un producto agotado y el carrito se conserva", async () => {
+        const { OrderServiceError } = jest.requireMock("@/lib/services/orders.service");
+        mockCreate.mockRejectedValue(new OrderServiceError("order_failed", "“Burger” ya no está disponible."));
+        render(<Checkout />);
+        await pressConfirm();
+        await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith("No se pudo confirmar", expect.stringContaining("ya no está disponible")));
+        expect(useCartStore.getState().items).toHaveLength(1);
     });
 });

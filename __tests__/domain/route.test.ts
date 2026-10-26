@@ -64,6 +64,8 @@ describe("servicio de rutas", () => {
         process.env.EXPO_PUBLIC_GOOGLE_DIRECTIONS_API_KEY = "K";
         const mk = (data: any, ok = true) => jest.fn().mockResolvedValue({ ok, json: async () => data });
         expect(await fetchRoute(A, B, mk({ status: "REQUEST_DENIED" }) as any)).toEqual({ ok: false, reason: "denied" });
+        expect(await fetchRoute(A, B, mk({ status: "OVER_QUERY_LIMIT" }) as any)).toEqual({ ok: false, reason: "quota" });
+        expect(await fetchRoute(A, B, mk({ status: "OVER_DAILY_LIMIT" }) as any)).toEqual({ ok: false, reason: "quota" });
         expect(await fetchRoute(A, B, mk({ status: "ZERO_RESULTS" }) as any)).toEqual({ ok: false, reason: "no_route" });
         expect(await fetchRoute(A, B, mk({ status: "OK", routes: [{ overview_polyline: { points: "x" } }] }) as any)).toEqual({ ok: false, reason: "no_route" });
         expect(await fetchRoute(A, B, mk({}, false) as any)).toEqual({ ok: false, reason: "network" });

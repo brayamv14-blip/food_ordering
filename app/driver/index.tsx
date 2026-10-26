@@ -4,11 +4,10 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import OrderStatusBadge from "@/components/OrderStatusBadge";
-import { appwriteConfig, callBackendFunction } from "@/lib/appwrite";
 import { startDriverBroadcaster } from "@/lib/domain/driverBroadcaster";
-import { getCurrentPosition } from "@/lib/services/location";
+import { getCurrentPosition, isPermissionFailure } from "@/lib/services/location";
 import { getMyRoles } from "@/lib/services/roles";
-import { StaffOrder, changeOrderStatus, describeBackendError, listMyDeliveries } from "@/lib/services/staff.service";
+import { StaffOrder, changeOrderStatus, describeBackendError, listMyDeliveries, sendDriverLocation } from "@/lib/services/staff.service";
 
 /**
  * Interfaz minima de repartidor (cuenta con etiqueta `driver`).
@@ -72,28 +71,30 @@ const DriverDeliveries = () => {
 
     const startSharing = (orderId: string) => {
         if (stopRef.current) return;
-        const fn = appwriteConfig.functions.updateDriverLocation;
-        if (!fn) {
-            Alert.alert("Configuración", "Falta EXPO_PUBLIC_FN_UPDATE_DRIVER_LOCATION en .env.local.");
-            return;
-        }
         setSharingError(null);
         setLastSent(null);
         const b = startDriverBroadcaster({
             getPosition: async () => {
                 const r = await getCurrentPosition();
                 if (!r.ok) {
-                    // Permiso denegado/bloqueado: no tiene sentido reintentar.
-                    throw Object.assign(new Error(r.message), { code: r.reason === "unavailable" ? "gps" : "forbidden" });
+                    // Permiso denegado/bloqueado: no tiene sentido reintentar. GPS apagado, senal
+                    // debil o sin posicion: se reintenta en el siguiente ciclo y se avisa.
+                    throw Object.assign(new Error(r.message), { code: isPermissionFailure(r.reason) ? "forbidden" : "gps" });
                 }
                 return r.coords;
             },
             send: async (p) => {
-                await callBackendFunction(fn, { orderId, latitude: p.latitude, longitude: p.longitude });
+                await sendDriverLocation(orderId, p.latitude, p.longitude);
             },
             onSent: () => setLastSent(new Date().toLocaleTimeString("es-MX")),
             onError: (e: any, fatal) => {
-                setSharingError(fatal ? `Envío detenido: ${e?.message ?? "error"}` : "Sin conexión o sin señal GPS; reintentando…");
+                setSharingError(
+                    fatal
+                        ? `Envío detenido: ${e?.message ?? "error"}`
+                        : e?.code === "gps"
+                            ? `${e.message} Reintentando…`
+                            : "Sin conexión; reintentando…"
+                );
                 if (fatal) {
                     stopRef.current = null;
                     setSharingId(null);

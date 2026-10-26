@@ -18,6 +18,9 @@ import { Client, IndexType, OrderBy, TablesDB } from 'node-appwrite';
 const DATABASE_ID = process.env.APPWRITE_DATABASE_ID ?? '6ab6f27e000135138f89';
 const ORDERS = process.env.APPWRITE_ORDERS_TABLE_ID ?? '6ab727bd00217e5c8f8d';
 const USERS = process.env.APPWRITE_USERS_TABLE_ID ?? '6ab6f52f00317b447fbe';
+const MENU = process.env.APPWRITE_MENU_TABLE_ID ?? '6ab6f3150012494438c2';
+// Tabla NUEVA (historial de cambios). Su ID lo eliges tu; debe coincidir con ORDER_EVENTS_TABLE_ID de la Function.
+const EVENTS = process.env.APPWRITE_ORDER_EVENTS_TABLE_ID ?? 'order_events';
 
 const apply = process.argv.includes('--apply');
 const rollback = process.argv.includes('--rollback');
@@ -25,6 +28,7 @@ const rollback = process.argv.includes('--rollback');
 const str = (key, size) => ({ kind: 'string', key, size });
 const flt = (key, min, max) => ({ kind: 'float', key, min, max });
 const dt = (key) => ({ kind: 'datetime', key });
+const bool = (key, xdefault) => ({ kind: 'bool', key, xdefault });
 
 export const PLAN = {
     [ORDERS]: {
@@ -42,13 +46,37 @@ export const PLAN = {
             str('driverName', 80),
             flt('driverLatitude', -90, 90),
             flt('driverLongitude', -180, 180),
-            dt('driverUpdatedAt')
+            dt('driverUpdatedAt'),
+            // Pago en linea (Mercado Pago): estado verificado SOLO por el servidor.
+            str('paymentStatus', 20),
+            str('paymentId', 64),
+            str('paymentUrl', 500)
         ],
         indexes: [
             { key: 'uniq_clientRequestId', type: IndexType.Unique, columns: ['clientRequestId'] },
             { key: 'idx_userId', type: IndexType.Key, columns: ['userId'] },
             { key: 'idx_driverUserId', type: IndexType.Key, columns: ['driverUserId'] }
         ]
+    },
+    [MENU]: {
+        label: 'menu',
+        // `available` (true por omision) permite marcar productos agotados.
+        columns: [bool('available', true)],
+        indexes: []
+    },
+    [EVENTS]: {
+        label: 'order_events',
+        isNew: true, // la tabla se crea (sin permisos de cliente: solo la escriben/leen las Functions)
+        columns: [
+            str('orderId', 36),
+            str('type', 20),
+            str('fromStatus', 20),
+            str('toStatus', 20),
+            str('actorId', 64),
+            str('actorRole', 12),
+            str('driverUserId', 64)
+        ],
+        indexes: [{ key: 'idx_orderId', type: IndexType.Key, columns: ['orderId'] }]
     },
     [USERS]: {
         label: 'users',
@@ -57,9 +85,13 @@ export const PLAN = {
             flt('homeLatitude', -90, 90),
             flt('homeLongitude', -180, 180),
             flt('workLatitude', -90, 90),
-            flt('workLongitude', -180, 180)
+            flt('workLongitude', -180, 180),
+            // Token de notificaciones push (opt-in del usuario).
+            str('pushToken', 200)
         ],
-        indexes: []
+        // Un perfil por cuenta. Si ya hay filas duplicadas con el mismo accountId, este indice
+        // fallara: limpia los duplicados en la consola antes de aplicar.
+        indexes: [{ key: 'uniq_accountId', type: IndexType.Unique, columns: ['accountId'] }]
     }
 };
 
@@ -67,6 +99,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function run(db, { apply, rollback, log = console.log }) {
     for (const [tableId, plan] of Object.entries(PLAN)) {
+        if (plan.isNew) {
+            const exists = (await db.listTables({ databaseId: DATABASE_ID })).tables.some((t) => t.$id === tableId);
+            if (rollback) {
+                if (exists) {
+                    log(`${apply ? 'ELIMINA' : '[vista previa] eliminaría'} tabla ${plan.label} completa  (SE PIERDE TODO EL HISTORIAL)`);
+                    if (apply) await db.deleteTable({ databaseId: DATABASE_ID, tableId });
+                }
+                continue;
+            }
+            if (!exists) {
+                log(`${apply ? '+ crea' : '[vista previa] crearía'} tabla ${plan.label} (sin permisos de cliente)`);
+                if (apply) await db.createTable({ databaseId: DATABASE_ID, tableId, name: plan.label, permissions: [], rowSecurity: false });
+            } else {
+                log(`= ya existe tabla ${plan.label}`);
+            }
+            if (!apply && !exists) {
+                for (const c of plan.columns) log(`[vista previa] crearía columna ${plan.label}.${c.key} (${c.kind})`);
+                for (const i of plan.indexes) log(`[vista previa] crearía índice ${plan.label}.${i.key} (${i.type})`);
+                continue;
+            }
+        }
         const existingCols = new Set((await db.listColumns({ databaseId: DATABASE_ID, tableId })).columns.map((c) => c.key));
         const existingIdx = new Set((await db.listIndexes({ databaseId: DATABASE_ID, tableId })).indexes.map((i) => i.key));
 
@@ -93,6 +146,7 @@ export async function run(db, { apply, rollback, log = console.log }) {
             if (c.kind === 'string') await db.createStringColumn({ ...base, size: c.size });
             if (c.kind === 'float') await db.createFloatColumn({ ...base, min: c.min, max: c.max });
             if (c.kind === 'datetime') await db.createDatetimeColumn(base);
+            if (c.kind === 'bool') await db.createBooleanColumn({ ...base, xdefault: c.xdefault });
         }
 
         if (apply && plan.indexes.length) {
