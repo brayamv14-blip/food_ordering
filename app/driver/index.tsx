@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, AppState, FlatList, RefreshControl, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, AppState, FlatList, Linking, RefreshControl, Text, TouchableOpacity, View } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import OrderStatusBadge from "@/components/OrderStatusBadge";
+import { buildNavigationUrl, getRestaurant } from "@/lib/domain/restaurant";
 import { startDriverBroadcaster } from "@/lib/domain/driverBroadcaster";
 import { getCurrentPosition, isPermissionFailure } from "@/lib/services/location";
 import { getMyRoles } from "@/lib/services/roles";
@@ -27,7 +28,9 @@ const DriverDeliveries = () => {
     const [sharingId, setSharingId] = useState<string | null>(null);
     const [lastSent, setLastSent] = useState<string | null>(null);
     const [sharingError, setSharingError] = useState<string | null>(null);
+    const [tab, setTab] = useState<"active" | "history">("active");
     const stopRef = useRef<null | (() => void)>(null);
+    const restaurant = getRestaurant();
 
     const stopSharing = useCallback(() => {
         stopRef.current?.();
@@ -38,14 +41,28 @@ const DriverDeliveries = () => {
     const load = useCallback(async () => {
         try {
             setError(null);
-            setOrders(await listMyDeliveries());
+            setOrders(await listMyDeliveries(tab === "history"));
         } catch (e) {
             setError(describeBackendError(e));
         } finally {
             setLoading(false);
             setRefreshing(false);
         }
-    }, []);
+    }, [tab]);
+
+    // Abre la app de mapas del teléfono para navegar a un destino con coordenadas reales.
+    const navigateTo = async (dest: { latitude: number; longitude: number } | null) => {
+        const url = buildNavigationUrl(dest);
+        if (!url) {
+            Alert.alert("Navegación", "Este destino no tiene coordenadas confirmadas. Usa la dirección escrita.");
+            return;
+        }
+        try {
+            await Linking.openURL(url);
+        } catch {
+            Alert.alert("Navegación", "No se pudo abrir la app de mapas.");
+        }
+    };
 
     useEffect(() => {
         getMyRoles().then((r) => {
@@ -54,6 +71,7 @@ const DriverDeliveries = () => {
             else setLoading(false);
         });
     }, [load]);
+    // (al cambiar de pestaña `load` cambia y se vuelve a consultar)
 
     // Sin seguimiento silencioso: al salir de la pantalla o ir a segundo plano se detiene.
     useEffect(() => {
@@ -140,6 +158,20 @@ const DriverDeliveries = () => {
                 <Text className="text-2xl font-bold text-dark-100">Mis entregas</Text>
             </View>
 
+            <View className="mx-5 mb-3 flex-row">
+                {(["active", "history"] as const).map((k) => (
+                    <TouchableOpacity
+                        key={k}
+                        onPress={() => { setLoading(true); setTab(k); }}
+                        className={`mr-2 rounded-full border px-4 py-2 ${tab === k ? "border-primary bg-primary" : "border-gray-200"}`}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: tab === k }}
+                    >
+                        <Text className={tab === k ? "font-bold text-white" : "text-dark-100"}>{k === "active" ? "Activas" : "Historial"}</Text>
+                    </TouchableOpacity>
+                ))}
+            </View>
+
             {sharingId && (
                 <View className="mx-5 mb-3 flex-row items-center rounded-xl bg-purple-100 p-3" accessibilityLiveRegion="polite">
                     <Ionicons name="navigate" size={18} color="#8B5CF6" />
@@ -157,7 +189,7 @@ const DriverDeliveries = () => {
                 keyExtractor={(o) => o.id}
                 contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }}
                 refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
-                ListEmptyComponent={!error ? <Text className="mt-10 text-center text-gray-400">No tienes entregas activas.</Text> : null}
+                ListEmptyComponent={!error ? <Text className="mt-10 text-center text-gray-400">{tab === "history" ? "Todavía no tienes entregas terminadas." : "No tienes entregas activas."}</Text> : null}
                 renderItem={({ item: o }) => {
                     const busy = busyId === o.id;
                     const sharing = sharingId === o.id;
@@ -171,12 +203,32 @@ const DriverDeliveries = () => {
                             <Text className="mt-1 text-sm text-gray-400">{o.deliveryAddress}</Text>
                             <Text className="mt-2 text-sm text-gray-400" numberOfLines={3}>{o.items.map((i) => `${i.quantity}× ${i.name}`).join(", ")}</Text>
 
-                            {o.status === "preparing" && (
+                            {tab === "active" && (
+                                <View className="mt-3 flex-row">
+                                    {restaurant && o.status === "preparing" && (
+                                        <TouchableOpacity onPress={() => navigateTo(restaurant.location)} className="mr-2 flex-row items-center rounded-xl border border-primary px-3 py-2" accessibilityRole="button" accessibilityLabel="Navegar al restaurante">
+                                            <Ionicons name="storefront-outline" size={16} color="#FF9C01" />
+                                            <Text className="ml-1 font-semibold text-primary">Ir al restaurante</Text>
+                                        </TouchableOpacity>
+                                    )}
+                                    <TouchableOpacity
+                                        onPress={() => navigateTo(typeof o.deliveryLatitude === "number" && typeof o.deliveryLongitude === "number" ? { latitude: o.deliveryLatitude, longitude: o.deliveryLongitude } : null)}
+                                        className="flex-row items-center rounded-xl border border-primary px-3 py-2"
+                                        accessibilityRole="button"
+                                        accessibilityLabel="Navegar al cliente"
+                                    >
+                                        <Ionicons name="navigate-outline" size={16} color="#FF9C01" />
+                                        <Text className="ml-1 font-semibold text-primary">Ir con el cliente</Text>
+                                    </TouchableOpacity>
+                                </View>
+                            )}
+
+                            {o.status === "preparing" && tab === "active" && (
                                 <TouchableOpacity onPress={() => setStatus(o, "on_the_way")} disabled={busy} className="mt-3 items-center rounded-xl bg-primary py-3">
                                     {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text className="font-bold text-white">Salir a reparto</Text>}
                                 </TouchableOpacity>
                             )}
-                            {o.status === "on_the_way" && (
+                            {o.status === "on_the_way" && tab === "active" && (
                                 <>
                                     <TouchableOpacity
                                         onPress={() => (sharing ? stopSharing() : startSharing(o.id))}

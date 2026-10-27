@@ -280,4 +280,18 @@ store.failPush = false; store.pushes.length = 0;
 r = await ops(mk('drv2', { orderId: o9.$id, status: 'on_the_way' })); check('en camino: aviso al cliente', pushes().length === 1 && pushes()[0].title === '¡Tu pedido va en camino!', pushes());
 r = await ops(mk('drv2', { orderId: o9.$id, status: 'delivered' })); check('entregado: aviso al cliente', pushes().at(-1).title === 'Pedido entregado', pushes().map((p) => p.title));
 
+// ---------- historial del repartidor y cobertura de entrega
+r = await ops(mk('drv2', { action: 'myDeliveries', history: true })); check('el repartidor ve SU historial (entregados)', r.s === 200 && r.b.orders.some((x) => x.id === o9.$id && x.status === 'delivered'), r.b.orders?.map((x) => x.status));
+r = await ops(mk('drv1', { action: 'myDeliveries', history: true })); check('el historial no incluye entregas de otro repartidor', r.s === 200 && !r.b.orders.some((x) => x.id === o9.$id), r.b.orders?.length);
+r = await ops(mk('drv2', { action: 'myDeliveries' })); check('sin history solo se ven las activas', r.s === 200 && !r.b.orders.some((x) => x.status === 'delivered'));
+r = await ops(mk('staff1', { action: 'listOrders' })); check('la vista de pedido incluye coordenadas de entrega para personal/repartidor', r.b.orders.some((x) => typeof x.deliveryLatitude === 'number'), r.b.orders?.[0]);
+Object.assign(process.env, { RESTAURANT_LATITUDE: '19.5', RESTAURANT_LONGITUDE: '-99.2', DELIVERY_RADIUS_KM: '5' });
+const ordersBefore = store.orders.length;
+r = await createOrder(mk('u1', other())); check('con cobertura activa: dentro del radio -> se crea', r.s === 200, r);
+r = await createOrder(mk('u1', other({ address: { line: 'Calle Lejana 999, Otra ciudad', label: 'manual', latitude: 19.9, longitude: -99.2 } }))); check('fuera del radio -> 422 out_of_coverage', r.s === 422 && r.b.code === 'out_of_coverage', r);
+r = await createOrder(mk('u1', other({ address: { line: 'Calle Sin Coordenadas 123', label: 'manual', latitude: null, longitude: null } }))); check('sin coordenadas no se puede verificar -> 422 coverage_unverified', r.s === 422 && r.b.code === 'coverage_unverified', r);
+check('los rechazados por cobertura no crean pedido', store.orders.length === ordersBefore + 1, store.orders.length - ordersBefore);
+delete process.env.RESTAURANT_LATITUDE; delete process.env.RESTAURANT_LONGITUDE; delete process.env.DELIVERY_RADIUS_KM;
+r = await createOrder(mk('u1', other({ address: { line: 'Calle Lejana 999, Otra ciudad', label: 'manual', latitude: 19.9, longitude: -99.2 } }))); check('sin cobertura configurada no se restringe nada', r.s === 200, r);
+
 console.log(`\n${ok} ok, ${bad} fallas`); process.exit(bad ? 1 : 0);

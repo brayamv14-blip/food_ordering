@@ -15,3 +15,6 @@ Se usa **Leaflet 1.9.4 dentro de `react-native-webview`** con teselas OpenStreet
 
 ## Licencias
 Datos © OpenStreetMap contributors (ODbL); servicio Geoapify (respeta sus términos y la atribución, ya incluida en el mapa).
+
+## Restaurante y navegación del repartidor
+Con `EXPO_PUBLIC_RESTAURANT_LATITUDE/LONGITUDE/NAME` (opcionales) el seguimiento muestra el marcador del restaurante (rojo) y el repartidor ve “Ir al restaurante”. “Ir con el cliente” abre la app de mapas del teléfono con las coordenadas confirmadas del pedido; sin coordenadas avisa en lugar de inventar un destino.

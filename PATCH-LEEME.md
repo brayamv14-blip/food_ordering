@@ -86,3 +86,7 @@ Cuando la revisión esté completa, agrega únicamente los archivos del proyecto
 En la última validación comunicada se aprobaron 269 pruebas en 23 suites, `npx tsc --noEmit` terminó sin errores y `git diff --check` solo mostró advertencias de finales de línea.
 
 Esto no confirma todavía el funcionamiento de los servicios reales, la instalación del APK, los pagos reales o de prueba en un dispositivo, las notificaciones push ni los permisos desplegados en Appwrite. Esas comprobaciones deben completarse antes de considerar el proyecto listo para producción.
+
+## Novedades v6
+- Cobertura de entrega opcional (servidor), historial y navegación del repartidor, marcador del restaurante, mensajes claros de errores de validación. Ver `docs/INVENTARIO.md` para el estado real (implementado / incompleto / ausente / bloqueado) y `docs/APPWRITE.md` para las variables nuevas.
+- Appwrite Free permite 5 funciones por proyecto; este proyecto usa 3. Elimina `staff-api` y `update-driver-location` si siguen desplegadas.

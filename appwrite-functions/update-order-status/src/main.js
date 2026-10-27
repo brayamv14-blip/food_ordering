@@ -256,7 +256,8 @@ export default async ({ req, res, log, error }) => {
                 if (!isDriver) return fail(res, 403, 'forbidden', 'Solo repartidores.');
                 const orders = (await db.listRows({
                     databaseId: DB, tableId: ORDERS,
-                    queries: [Query.equal('driverUserId', userId), Query.equal('status', ACTIVE_DELIVERY), Query.orderDesc('$createdAt'), Query.limit(20)]
+                    // `history: true` => entregas ya terminadas (entregado/cancelado) de ESTE repartidor.
+                    queries: [Query.equal('driverUserId', userId), Query.equal('status', body.history === true ? ['delivered', 'cancelled'] : ACTIVE_DELIVERY), Query.orderDesc('$createdAt'), Query.limit(20)]
                 })).rows;
                 const items = await itemsFor(orders);
                 return res.json({ orders: orders.map((o) => toStaffOrderView(o, items[o.$id] ?? [])) });

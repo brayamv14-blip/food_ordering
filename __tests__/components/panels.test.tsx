@@ -1,4 +1,4 @@
-import { Alert } from "react-native";
+import { Alert, Linking } from "react-native";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react-native";
 
 jest.mock("expo-router", () => ({ router: { back: jest.fn(), push: jest.fn(), replace: jest.fn() } }));
@@ -13,7 +13,7 @@ jest.mock("@/lib/services/staff.service", () => ({
     listDrivers: () => mockDrivers(),
     assignDriver: (...a: any[]) => mockAssign(...a),
     changeOrderStatus: (...a: any[]) => mockChange(...a),
-    listMyDeliveries: () => mockMine(),
+    listMyDeliveries: (...a: any[]) => mockMine(...a),
     describeBackendError: (e: any) => e?.message ?? "error"
 }));
 const mockPosition = jest.fn();
@@ -217,5 +217,37 @@ describe("pantalla del repartidor", () => {
         fireEvent.press(screen.getByText("Marcar entregado"));
         await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "delivered"));
         expect(screen.queryByText(/Compartiendo tu ubicación/)).toBeNull();
+    });
+});
+
+describe("pantalla del repartidor: navegación e historial", () => {
+    beforeEach(() => {
+        mockRoles.mockResolvedValue({ staff: false, driver: true });
+    });
+
+    it("abre la navegación al cliente solo si hay coordenadas confirmadas", async () => {
+        const open = jest.spyOn(Linking, "openURL").mockResolvedValue(true as never);
+        mockMine.mockResolvedValue([order({ id: "ordnav01", deliveryLatitude: 19.43, deliveryLongitude: -99.13 })]);
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByLabelText("Navegar al cliente"));
+        await waitFor(() => expect(open).toHaveBeenCalledWith("https://www.google.com/maps/dir/?api=1&destination=19.43,-99.13&travelmode=driving"));
+    });
+    it("sin coordenadas avisa en vez de abrir un destino inventado", async () => {
+        const open = jest.spyOn(Linking, "openURL").mockResolvedValue(true as never);
+        mockMine.mockResolvedValue([order({ id: "ordnav02" })]);
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByLabelText("Navegar al cliente"));
+        expect(open).not.toHaveBeenCalled();
+        expect(Alert.alert).toHaveBeenCalledWith("Navegación", expect.stringMatching(/coordenadas/));
+    });
+    it("el historial pide solo entregas terminadas y no ofrece acciones de reparto", async () => {
+        mockMine.mockResolvedValue([order({ id: "ordact01" })]);
+        render(<DriverDeliveries />);
+        await screen.findByText("Salir a reparto");
+        mockMine.mockResolvedValue([order({ id: "ordhis01", status: "delivered" })]);
+        fireEvent.press(screen.getByText("Historial"));
+        await waitFor(() => expect(mockMine).toHaveBeenLastCalledWith(true));
+        await waitFor(() => expect(screen.queryByText("Salir a reparto")).toBeNull());
+        expect(screen.queryByLabelText("Navegar al cliente")).toBeNull();
     });
 });

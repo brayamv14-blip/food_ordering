@@ -1,7 +1,7 @@
 import { Client, ID, Messaging, Permission, Query, Role, TablesDB, Users } from 'node-appwrite';
 import {
     buildCheckoutSessionParams, buildOrderEvent, buildOrderReceivedNotification, buildPushRequest, isStripeCheckoutUrl,
-    priceOrder, stripeRequest, validateAddressInput, validatePaymentMethod, validatePhone
+    priceOrder, stripeRequest, validateAddressInput, checkCoverage, validatePaymentMethod, validatePhone
 } from './rules.js';
 
 const DB = process.env.DATABASE_ID;
@@ -74,6 +74,13 @@ export default async ({ req, res, log, error }) => {
     }
     const addr = validateAddressInput(address);
     if (!addr.ok) return fail(res, 400, addr.code, addr.error);
+    const cover = checkCoverage({
+        restaurantLat: process.env.RESTAURANT_LATITUDE,
+        restaurantLng: process.env.RESTAURANT_LONGITUDE,
+        radiusKm: process.env.DELIVERY_RADIUS_KM,
+        address: addr
+    });
+    if (!cover.ok) return fail(res, 422, cover.code, cover.error);
     const phone = validatePhone(contact && contact.phone);
     if (!phone.ok) return fail(res, 400, phone.code, phone.error);
     const pay = validatePaymentMethod(body.paymentMethod);

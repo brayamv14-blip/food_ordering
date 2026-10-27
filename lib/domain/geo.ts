@@ -33,8 +33,8 @@ export interface MapMarker {
     id: string;
     position: LatLng;
     label?: string;
-    /** `destination` (naranja), `driver` (morado) o `pick` (el punto elegido). */
-    kind: "destination" | "driver" | "pick";
+    /** `destination` (naranja), `driver` (morado), `restaurant` (rojo) o `pick` (el punto elegido). */
+    kind: "destination" | "driver" | "pick" | "restaurant";
 }
 
 export interface MapData {
@@ -102,7 +102,7 @@ export function buildMapHtml({ apiKey, center, zoom = 15, pickable = false, data
   var layer = L.tileLayer(${safeJson(tiles)}, { maxZoom: 19, attribution: ${safeJson(MAP_ATTRIBUTION)} }).addTo(map);
   var errors = 0;
   layer.on('tileerror', function () { if (++errors === 4) post({ type: 'error', message: 'No se pudieron cargar las teselas del mapa' }); });
-  var COLORS = { destination: '#FE8C00', driver: '#8B5CF6', pick: '#16A34A' };
+  var COLORS = { destination: '#FE8C00', driver: '#8B5CF6', pick: '#16A34A', restaurant: '#DC2626' };
   var group = L.layerGroup().addTo(map), line = null, fitted = false;
   window.setMapData = function (d, fit) {
     group.clearLayers(); if (line) { map.removeLayer(line); line = null; }

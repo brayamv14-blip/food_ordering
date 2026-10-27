@@ -11,6 +11,7 @@ import { useRoute } from "@/hooks/useRoute";
 import { describeAge } from "@/lib/domain/coordinates";
 import { getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
 import { MapData, MapMarker } from "@/lib/domain/geo";
+import { getRestaurant } from "@/lib/domain/restaurant";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
 
 const TrackingScreen = () => {
@@ -26,6 +27,8 @@ const TrackingScreen = () => {
     // Solo puntos reales: el destino del pedido y la última ubicación que el repartidor sí compartió.
     const mapData = useMemo<MapData>(() => {
         const markers: MapMarker[] = [];
+        const restaurant = getRestaurant();
+        if (restaurant) markers.push({ id: "rest", kind: "restaurant", position: restaurant.location, label: restaurant.name });
         if (destination) markers.push({ id: "dest", kind: "destination", position: destination, label: "Destino" });
         if (driver) markers.push({ id: "drv", kind: "driver", position: driver, label: order?.driverName ?? "Repartidor" });
         return { markers, route: route?.ok ? route.points : [] };

@@ -33,6 +33,7 @@ import {
 import { computeOrderTotals, unitPrice, formatMoney } from "@/lib/domain/pricing";
 import { findUnavailableItems } from "@/lib/services/catalog.service";
 import AddressPicker from "@/components/AddressPicker";
+import { friendlyServerError } from "@/lib/domain/restaurant";
 import { PAYMENT_LABELS, PaymentMethod, describeProviderStatus } from "@/lib/domain/payment";
 import { isOnlinePaymentEnabled, openCheckout, syncPayment } from "@/lib/services/payments.service";
 
@@ -178,7 +179,8 @@ const Checkout = () => {
             const message =
                 error instanceof OrderServiceError
                     ? error.message + (error.compensated ? " No se guardó nada; puedes reintentar." : " Revisa Mis pedidos antes de reintentar.")
-                    : "No pudimos registrar tu pedido. Revisa tu conexión e inténtalo de nuevo.";
+                    : friendlyServerError(error) ??
+                      "No pudimos registrar tu pedido. Revisa tu conexión e inténtalo de nuevo.";
             Alert.alert("No se pudo confirmar", message);
         } finally {
             submittingRef.current = false;

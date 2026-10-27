@@ -61,6 +61,18 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(rules.TRANSITIONS).toEqual(JSON.parse(JSON.stringify(ALLOWED_TRANSITIONS)));
     });
 
+    it("cobertura de entrega: opcional, por radio, y exige coordenadas cuando está activa", () => {
+        const cfg = { restaurantLat: "19.5", restaurantLng: "-99.2", radiusKm: "5" };
+        expect(rules.checkCoverage({ address: { latitude: 19.9, longitude: -99.2 } })).toEqual({ ok: true, checked: false });
+        expect(rules.checkCoverage({ ...cfg, address: { latitude: 19.51, longitude: -99.2 } })).toMatchObject({ ok: true, checked: true });
+        expect(rules.checkCoverage({ ...cfg, address: { latitude: 19.9, longitude: -99.2 } })).toMatchObject({ ok: false, code: "out_of_coverage" });
+        expect(rules.checkCoverage({ ...cfg, address: { latitude: null, longitude: null } })).toMatchObject({ ok: false, code: "coverage_unverified" });
+        expect(rules.checkCoverage({ ...cfg, radiusKm: "0", address: { latitude: 19.9, longitude: -99.2 } }).checked).toBe(false);
+        expect(rules.checkCoverage({ restaurantLat: "x", restaurantLng: "-99", radiusKm: "5", address: null }).checked).toBe(false);
+        expect(rules.distanceKm({ latitude: 19.5, longitude: -99.2 }, { latitude: 19.5, longitude: -99.2 })).toBe(0);
+        expect(rules.toStaffOrderView({ $id: "o1", deliveryLatitude: 19.4, deliveryLongitude: "x" })).toMatchObject({ deliveryLatitude: 19.4, deliveryLongitude: null });
+    });
+
     it("solo existen las tres funciones permitidas (pedidos, estados y webhook de Stripe)", () => {
         const root = path.join(__dirname, "../../appwrite-functions");
         const dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, "src/main.js"))).map((d) => d.name).sort();

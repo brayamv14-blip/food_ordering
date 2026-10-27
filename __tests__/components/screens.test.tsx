@@ -94,7 +94,7 @@ describe("registro (pantalla)", () => {
         );
     };
 
-    it("actualiza la sesiÃ³n antes de navegar despuÃ©s del registro", async () => {
+    it("actualiza la sesión antes de navegar después del registro", async () => {
         mockCreateUser.mockResolvedValue({});
 fetchUser.mockImplementationOnce(async () => {
     useAuthStore.setState({
@@ -134,7 +134,7 @@ fetchUser.mockImplementationOnce(async () => {
         );
     });
 
-    it("valida en espaÃ±ol sin llamar al servidor", () => {
+    it("valida en español sin llamar al servidor", () => {
         render(<SignUp />);
 
         fireEvent.changeText(
@@ -178,8 +178,8 @@ fetchUser.mockImplementationOnce(async () => {
     });
 });
 
-describe("inicio de sesiÃ³n (pantalla)", () => {
-    it("credenciales incorrectas muestran error en espaÃ±ol y no navegan", async () => {
+describe("inicio de sesión (pantalla)", () => {
+    it("credenciales incorrectas muestran error en español y no navegan", async () => {
         mockSignIn.mockRejectedValue(
             Object.assign(
                 new Error(
@@ -213,7 +213,7 @@ describe("inicio de sesiÃ³n (pantalla)", () => {
         expect(mockReplace).not.toHaveBeenCalled();
     });
 
-    it("con credenciales vÃ¡lidas actualiza la sesiÃ³n y entra", async () => {
+    it("con credenciales válidas actualiza la sesión y entra", async () => {
         mockSignIn.mockResolvedValue(undefined);
 
         render(<SignIn />);
@@ -275,8 +275,8 @@ describe("tarjeta de producto", () => {
     });
 });
 
-describe("carga de catÃ¡logo (useAppwrite)", () => {
-    it("expone un error en espaÃ±ol sin alertas en inglÃ©s", async () => {
+describe("carga de catálogo (useAppwrite)", () => {
+    it("expone un error en español sin alertas en inglés", async () => {
         const fn = jest
             .fn()
             .mockRejectedValue(new Error("Network request failed"));
@@ -317,13 +317,13 @@ describe("carga de catÃ¡logo (useAppwrite)", () => {
     });
 });
 
-describe("recuperaciÃ³n de contraseÃ±a (pantallas)", () => {
+describe("recuperación de contraseña (pantallas)", () => {
     const GOOD = {
         userId: "64f1a2b3c4d5e6f7a8b9",
         secret: "abcdef0123456789abcdef0123456789",
     };
 
-    it("pide un correo vÃ¡lido antes de enviar", () => {
+    it("pide un correo válido antes de enviar", () => {
         render(<ForgotPassword />);
 
         fireEvent.changeText(
@@ -341,7 +341,7 @@ describe("recuperaciÃ³n de contraseÃ±a (pantallas)", () => {
         expect(mockRequestRecovery).not.toHaveBeenCalled();
     });
 
-    it("envÃ­a el correo y avisa que revise su bandeja", async () => {
+    it("envía el correo y avisa que revise su bandeja", async () => {
         mockRequestRecovery.mockResolvedValue({});
 
         render(<ForgotPassword />);
@@ -387,7 +387,7 @@ describe("recuperaciÃ³n de contraseÃ±a (pantallas)", () => {
         });
     });
 
-    it("muestra el lÃ­mite de intentos y la falta de configuraciÃ³n", async () => {
+    it("muestra el límite de intentos y la falta de configuración", async () => {
         mockRequestRecovery.mockRejectedValue(
             Object.assign(new Error("rate"), { code: 429 })
         );
@@ -428,7 +428,7 @@ describe("recuperaciÃ³n de contraseÃ±a (pantallas)", () => {
         });
     });
 
-    it("con el enlace profundo cambia la contraseÃ±a y lleva a iniciar sesiÃ³n", async () => {
+    it("con el enlace profundo cambia la contraseña y lleva a iniciar sesión", async () => {
         mockParams = GOOD;
         mockCompleteRecovery.mockResolvedValue({});
 
@@ -463,7 +463,7 @@ describe("recuperaciÃ³n de contraseÃ±a (pantallas)", () => {
         expect(mockReplace).toHaveBeenCalledWith("/sign-in");
     });
 
-    it("sin enlace profundo acepta el enlace pegado y rechaza uno invÃ¡lido", async () => {
+    it("sin enlace profundo acepta el enlace pegado y rechaza uno inválido", async () => {
         mockCompleteRecovery.mockResolvedValue({});
 
         render(<ResetPassword />);
@@ -502,7 +502,7 @@ describe("recuperaciÃ³n de contraseÃ±a (pantallas)", () => {
         });
     });
 
-    it("valida que las contraseÃ±as coincidan y explica un enlace vencido", async () => {
+    it("valida que las contraseñas coincidan y explica un enlace vencido", async () => {
         mockParams = GOOD;
 
         render(<ResetPassword />);

@@ -15,6 +15,9 @@ export interface StaffOrder {
     customerName: string;
     customerPhone: string;
     deliveryAddress: string;
+    /** Coordenadas reales de entrega (si el cliente las confirmó); null si no hay. */
+    deliveryLatitude?: number | null;
+    deliveryLongitude?: number | null;
     driverUserId: string | null;
     driverName: string | null;
     items: { name: string; quantity: number }[];
@@ -81,8 +84,8 @@ export async function assignDriver(orderId: string, driverUserId: string, expect
     await call("assignDriver", clean({ orderId, driverUserId, ...expected }));
 }
 
-export async function listMyDeliveries(): Promise<StaffOrder[]> {
-    const res = await call<{ orders?: StaffOrder[] }>("myDeliveries");
+export async function listMyDeliveries(history = false): Promise<StaffOrder[]> {
+    const res = await call<{ orders?: StaffOrder[] }>("myDeliveries", history ? { history: true } : undefined);
     return Array.isArray(res?.orders) ? res.orders : [];
 }
 

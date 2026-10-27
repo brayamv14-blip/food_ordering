@@ -17,3 +17,12 @@ API key dinámica: filas (leer/escribir), usuarios (leer) y mensajes (`messages.
 - Importes, estado de pago, roles y estados privilegiados solo los cambian las Functions (validan transiciones, propiedad y rol). El cliente no manda precios.
 - Cuando todo funcione, quita Create/Update/Delete a *Users* en `orders`/`order_items` y activa seguridad por fila (ver PATCH-LEEME §3). Mientras sigan abiertos, los pedidos no están protegidos.
 - Etiquetas `staff` y `driver` en Auth → usuario → Labels.
+
+## Cobertura de entrega (opcional, en el servidor)
+En `create-order` define `RESTAURANT_LATITUDE`, `RESTAURANT_LONGITUDE` y `DELIVERY_RADIUS_KM`. Con las tres, un pedido cuya dirección quede fuera del radio se rechaza (`422 out_of_coverage`) y una dirección sin coordenadas no se puede verificar (`422 coverage_unverified`: el cliente debe elegirla en el mapa). Sin ellas no se restringe nada.
+
+## Cuota del plan gratuito
+Appwrite Cloud Free permite **5 funciones por proyecto** (fuente: https://appwrite.io/docs/advanced/billing/free). Este proyecto usa 3 (`create-order`, `update-order-status`, `stripe-webhook`). Si todavía tienes desplegadas `staff-api` o `update-driver-location` de versiones anteriores, **elimínalas** (ya no se usan) para no agotar la cuota.
+
+## Repartidor
+`myDeliveries` devuelve las entregas activas del repartidor autenticado; con `history: true`, sus entregas terminadas (entregado/cancelado). Las vistas de pedido para personal/repartidor incluyen `deliveryLatitude/deliveryLongitude` solo si el cliente confirmó coordenadas.

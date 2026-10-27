@@ -41,6 +41,9 @@ describe("servicio de personal (una sola función con campo action)", () => {
         mockCall.mockResolvedValue(null);
         expect(await listDrivers()).toEqual([]);
         expect(await listMyDeliveries()).toEqual([]);
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "myDeliveries" });
+        await listMyDeliveries(true);
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "myDeliveries", history: true });
         expect(await getOrderHistory("o1")).toEqual({ enabled: false, events: [] });
     });
     it("asigna repartidor y cambia estado enviando solo ids y lo que el usuario vio", async () => {

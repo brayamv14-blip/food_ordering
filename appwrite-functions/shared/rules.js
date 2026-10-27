@@ -135,6 +135,37 @@ function validateAddressInput(address) {
     return { ok: true, line, label, latitude, longitude };
 }
 
+/** Distancia en km (haversine) entre dos puntos {latitude, longitude}. */
+function distanceKm(a, b) {
+    const R = 6371;
+    const rad = (d) => (d * Math.PI) / 180;
+    const dLat = rad(b.latitude - a.latitude);
+    const dLng = rad(b.longitude - a.longitude);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.latitude)) * Math.cos(rad(b.latitude)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/**
+ * Cobertura de entrega (opcional): se activa solo si el servidor tiene configurados el punto del
+ * restaurante y un radio. Sin configuracion no se restringe nada. Con cobertura activa, una direccion
+ * sin coordenadas no se puede verificar y se rechaza (el cliente debe elegirla en el mapa).
+ */
+function checkCoverage({ restaurantLat, restaurantLng, radiusKm, address }) {
+    const lat = Number(restaurantLat);
+    const lng = Number(restaurantLng);
+    const radius = Number(radiusKm);
+    const configured = restaurantLat !== undefined && restaurantLat !== '' && restaurantLng !== undefined && restaurantLng !== '' &&
+        Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radius) && radius > 0;
+    if (!configured) return { ok: true, checked: false };
+    if (!address || address.latitude === null || address.longitude === null || address.latitude === undefined) {
+        return { ok: false, code: 'coverage_unverified', error: 'Elige la dirección en el mapa para confirmar que llegamos a tu zona.' };
+    }
+    const km = distanceKm({ latitude: lat, longitude: lng }, { latitude: address.latitude, longitude: address.longitude });
+    return km <= radius
+        ? { ok: true, checked: true, distanceKm: Math.round(km * 10) / 10 }
+        : { ok: false, code: 'out_of_coverage', error: `Tu dirección queda fuera de la zona de entrega (${radius} km).` };
+}
+
 function validatePhone(raw) {
     const phone = String(raw == null ? '' : raw).replace(/[\s().-]/g, '');
     const digits = phone.replace(/\D/g, '');
@@ -164,6 +195,8 @@ function toStaffOrderView(order, items = []) {
         customerName: order.customerName || '',
         customerPhone: order.customerPhone || '',
         deliveryAddress: order.deliveryAddress || '',
+        deliveryLatitude: typeof order.deliveryLatitude === 'number' ? order.deliveryLatitude : null,
+        deliveryLongitude: typeof order.deliveryLongitude === 'number' ? order.deliveryLongitude : null,
         paymentMethod: order.paymentMethod || 'cash_on_delivery',
         paymentStatus: order.paymentStatus || null,
         driverUserId: order.driverUserId || null,
@@ -464,7 +497,7 @@ function buildPushRequest(accountId, message) {
 module.exports = {
     TRANSITIONS, ACTIVE_DELIVERY, ASSIGNABLE, TERMINAL,
     canActorTransition, priceOrder, validateDriverPosition,
-    validateAddressInput, validatePhone, canAssignDriver, toStaffOrderView,
+    validateAddressInput, validatePhone, distanceKm, checkCoverage, canAssignDriver, toStaffOrderView,
     checkExpected, parseDateRange, matchesOrderQuery, buildOrderEvent, isMenuAvailable,
     PAYMENT_METHODS, PAYMENT_STATUSES, PAYMENT_TRANSITIONS, CURRENCY, validatePaymentMethod, movePaymentStatus,
     buildCheckoutSessionParams, formEncode, checkSessionPayment, paymentIntentId,
