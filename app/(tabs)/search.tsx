@@ -1,4 +1,4 @@
-import {FlatList, Text, View} from 'react-native'
+import {FlatList, Text, TouchableOpacity, View} from 'react-native'
 import {SafeAreaView} from "react-native-safe-area-context";
 import useAppwrite from "@/lib/useAppwrite";
 import {getCategories, getMenu} from "@/lib/appwrite";
@@ -15,8 +15,8 @@ import SearchBar from "@/components/SearchBar";
 const Search = () => {
     const { category, query } = useLocalSearchParams<{query: string; category: string}>()
 
-    const { data, refetch, loading } = useAppwrite({ fn: getMenu, params: { category,  query,  limit: 6, } });
-    const { data: categories } = useAppwrite({ fn: getCategories });
+    const { data, refetch, loading, error } = useAppwrite({ fn: getMenu, params: { category,  query,  limit: 6, } });
+    const { data: categories, refetch: refetchCategories, error: categoriesError } = useAppwrite({ fn: getCategories });
 
     useEffect(() => {
         refetch({ category, query, limit: 6})
@@ -54,10 +54,25 @@ const Search = () => {
 
                         <SearchBar />
 
-                        <Filter categories={categories!} />
+                        <Filter categories={categories ?? []} />
                     </View>
                 )}
-                ListEmptyComponent={() => !loading && <Text>No results</Text>}
+                ListEmptyComponent={() =>
+                    loading ? null : (error || categoriesError) ? (
+                        <View className="items-center px-5 mt-10">
+                            <Text className="text-center text-gray-400">{error ?? categoriesError}</Text>
+                            <TouchableOpacity
+                                onPress={() => { refetch({ category, query, limit: 6 }); refetchCategories(); }}
+                                className="mt-4 rounded-xl bg-primary px-6 py-3"
+                                accessibilityRole="button"
+                            >
+                                <Text className="font-bold text-white">Reintentar</Text>
+                            </TouchableOpacity>
+                        </View>
+                    ) : (
+                        <Text className="text-center text-gray-400 mt-10">No se encontraron productos.</Text>
+                    )
+                }
             />
         </SafeAreaView>
     )

@@ -40,3 +40,11 @@ app-example
 
 .env.local
 .env 
+# Credenciales locales de Firebase
+/google-services.json
+/google-services.*.json
+# local env (variantes)
+.env.*
+!.env.example
+*.keystore
+android/app/google-services.json

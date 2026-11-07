@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recuperar contraseña · Delivery</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;color:#222}
+  h1{font-size:1.3rem}
+  a.btn{display:inline-block;background:#FE8C00;color:#fff;padding:.8rem 1.2rem;border-radius:2rem;text-decoration:none;font-weight:700}
+  code{word-break:break-all;background:#f3f3f3;padding:.1rem .3rem;border-radius:.2rem}
+  .warn{color:#b02a37}
+</style>
+</head>
+<body>
+<h1>Recuperar contraseña</h1>
+<p id="msg">Cargando…</p>
+<p><a id="open" class="btn" hidden>Abrir la app</a></p>
+<p id="manual" hidden>Si el botón no abre la app, copia este enlace completo y pégalo en la pantalla
+  «Nueva contraseña»:<br><code id="full"></code></p>
+<script>
+/* Puente: Appwrite redirige aquí con ?userId=...&secret=...; se reenvía a la app (esquema fastfood://).
+   No se guarda ni se envía nada a ningún servidor. Los valores se validan y se insertan con textContent. */
+(function () {
+  var q = new URLSearchParams(location.search);
+  var userId = q.get('userId') || '', secret = q.get('secret') || '';
+  var ok = /^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(userId) && /^[A-Za-z0-9]{10,256}$/.test(secret);
+  var msg = document.getElementById('msg');
+  if (!ok) { msg.textContent = 'Enlace no válido. Solicita uno nuevo desde la app.'; msg.className = 'warn'; return; }
+  var deep = 'fastfood://reset-password?userId=' + encodeURIComponent(userId) + '&secret=' + encodeURIComponent(secret);
+  msg.textContent = 'Toca el botón para continuar en la app. El enlace vence 1 hora después de pedirlo.';
+  var a = document.getElementById('open'); a.href = deep; a.hidden = false;
+  document.getElementById('full').textContent = location.href;
+  document.getElementById('manual').hidden = false;
+})();
+</script>
+</body>
+</html>

@@ -13,6 +13,8 @@ export interface MenuItem {
     rating: number;
     type?: string;
     categories?: string;
+    /** false = agotado. Si la columna no existe se considera disponible. */
+    available?: boolean;
 }
 
 export interface Category {
@@ -132,6 +134,8 @@ export interface CreateUserParams {
     email: string;
     password: string;
     name: string;
+    phone: string;
+phone?: string | null;
 }
 
 export interface SignInParams {

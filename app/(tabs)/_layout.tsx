@@ -4,6 +4,7 @@ import {TabBarIconProps} from "@/type";
 import {Image, Text, View} from "react-native";
 import {images} from "@/constants";
 import cn from "clsx";
+import NotificationHandler from "@/components/NotificationHandler";
 
 const TabBarIcon = ({ focused, icon, title }: TabBarIconProps) => (
     <View className="tab-icon">
@@ -20,6 +21,8 @@ export default function TabLayout() {
     if(!isAuthenticated) return <Redirect href="/sign-in" />
 
     return (
+        <>
+        <NotificationHandler />
         <Tabs screenOptions={{
                 headerShown: false,
                 tabBarShowLabel: false,
@@ -69,5 +72,6 @@ export default function TabLayout() {
                 }}
             />
         </Tabs>
+        </>
     );
 }

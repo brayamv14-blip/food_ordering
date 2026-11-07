@@ -1,0 +1,62 @@
+import { Client, TablesDB, Users } from 'node-appwrite';
+import { canActorTransition } from './rules.js';
+
+const DB = process.env.DATABASE_ID;
+const ORDERS = process.env.ORDERS_TABLE_ID;
+
+const fail = (res, status, code, error) => res.json({ code, error }, status);
+
+export default async ({ req, res, error }) => {
+    const userId = req.headers['x-appwrite-user-id'];
+    if (!userId) return fail(res, 401, 'unauthenticated', 'Inicia sesión.');
+
+    const client = new Client()
+        .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
+        .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
+        .setKey(req.headers['x-appwrite-key']);
+    const db = new TablesDB(client);
+    const users = new Users(client);
+
+    let body;
+    try {
+        body = typeof req.bodyJson === 'object' && req.bodyJson ? req.bodyJson : JSON.parse(req.bodyText || '{}');
+    } catch {
+        return fail(res, 400, 'bad_json', 'Cuerpo inválido.');
+    }
+    const { orderId, status: to } = body;
+    if (typeof orderId !== 'string' || typeof to !== 'string') return fail(res, 400, 'bad_request', 'Datos incompletos.');
+
+    try {
+        const user = await users.get({ userId });
+        const labels = user.labels ?? [];
+        const actor = labels.includes('staff') ? 'staff' : labels.includes('driver') ? 'driver' : 'customer';
+
+        const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+        const isOwner = order.userId === userId;
+
+        // Un repartidor solo opera pedidos que tiene asignados.
+        if (actor === 'driver' && order.driverUserId !== userId) {
+            return fail(res, 403, 'forbidden', 'Este pedido no está asignado a ti.');
+        }
+        // Un cliente solo toca sus propios pedidos (y no revela que otros existen).
+        if (actor === 'customer' && !isOwner) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+
+        const verdict = canActorTransition({ actor, isOwner, from: order.status, to, hasDriver: !!order.driverUserId });
+        if (!verdict.ok) {
+            const status = verdict.code === 'forbidden' ? 403 : 409;
+            return fail(res, status, verdict.code, verdict.error);
+        }
+
+        const data = { status: to };
+        // Al terminar el pedido se deja de conservar la ubicacion del repartidor.
+        if (to === 'delivered' || to === 'cancelled') {
+            data.driverLatitude = null;
+            data.driverLongitude = null;
+        }
+        const updated = await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data });
+        return res.json({ orderId: updated.$id, status: updated.status });
+    } catch (e) {
+        error(e.message);
+        return fail(res, 500, 'internal', 'No se pudo actualizar el pedido.');
+    }
+};

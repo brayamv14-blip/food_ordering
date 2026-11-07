@@ -1,5 +1,21 @@
 import { CartCustomization, CartStore } from "@/type";
 import { create } from "zustand";
+import { MAX_ITEM_QUANTITY, isValidMoney } from "@/lib/domain/pricing";
+
+/** Rechaza articulos con precios/identificadores manipulados o corruptos. */
+function isValidCartItem(item: {
+    id?: unknown;
+    price?: unknown;
+    customizations?: { id?: unknown; price?: unknown }[] | null;
+}): boolean {
+    if (typeof item?.id !== "string" || item.id.trim() === "") return false;
+    if (!isValidMoney(item.price)) return false;
+    return (item.customizations ?? []).every(
+        (c) => typeof c?.id === "string" && c.id !== "" && isValidMoney(c.price)
+    );
+}
+
+const capQty = (n: number) => Math.min(n, MAX_ITEM_QUANTITY);
 
 function areCustomizationsEqual(
     a: CartCustomization[] = [],
@@ -24,6 +40,7 @@ export const useCartStore = create<CartStore>((set, get) => ({
     items: [],
 
     addItem: (item) => {
+        if (!isValidCartItem(item)) return;
         const customizations = item.customizations ?? [];
 
         const existing = get().items.find(
@@ -45,7 +62,7 @@ export const useCartStore = create<CartStore>((set, get) => ({
                     )
                         ? {
                               ...i,
-                              quantity: i.quantity + 1
+                              quantity: capQty(i.quantity + 1)
                           }
                         : i
                 )
@@ -69,6 +86,7 @@ export const useCartStore = create<CartStore>((set, get) => ({
         oldCustomizations,
         item
     ) => {
+        if (!isValidCartItem(item)) return;
         const currentItems = get().items;
 
         const updatedItems = currentItems.map((currentItem) => {
@@ -126,7 +144,7 @@ export const useCartStore = create<CartStore>((set, get) => ({
                 )
                     ? {
                           ...i,
-                          quantity: i.quantity + 1
+                          quantity: capQty(i.quantity + 1)
                       }
                     : i
             )

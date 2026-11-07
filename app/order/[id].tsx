@@ -1,490 +1,175 @@
-import { useEffect, useState } from "react";
-import {
-ActivityIndicator,
-Alert,
-ScrollView,
-Text,
-TouchableOpacity,
-View
-} from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Alert, ScrollView, Text, TouchableOpacity, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
-import {
-cancelOrder,
-getCurrentUser,
-getMyOrders
-} from "@/lib/appwrite";
+import useAuthStore from "@/store/auth.store";
+import { useOrderTracking } from "@/hooks/useOrderTracking";
+import { cancelMyOrder } from "@/lib/services/orders.service";
+import { canCustomerCancel, getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
+import { formatMoney } from "@/lib/domain/pricing";
+import OrderStatusBadge from "@/components/OrderStatusBadge";
+import OrderStatusTimeline from "@/components/OrderStatusTimeline";
 
-const OrderDetails = () => {
-const { id } = useLocalSearchParams<{
-id: string;
-}>();
+const fmtDate = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" }) : null;
 
+const OrderDetail = () => {
+    const { id } = useLocalSearchParams<{ id: string }>();
+    const user = useAuthStore((s) => s.user);
+    const { order, loading, error, stale } = useOrderTracking(id, user?.accountId ?? user?.$id);
+    const [cancelling, setCancelling] = useState(false);
 
-const [order, setOrder] = useState<any>(null);
-const [loading, setLoading] = useState(true);
-
-const loadOrder = async () => {
-    try {
-        const user = await getCurrentUser();
-
-        const userId =
-            user.accountId ?? user.$id;
-
-        const orders =
-            await getMyOrders(userId);
-
-        const foundOrder = orders.find(
-            (item: any) =>
-                item.$id === id
-        );
-
-        setOrder(foundOrder ?? null);
-    } catch (error) {
-        console.log(
-            "Error al cargar detalle del pedido:",
-            error
-        );
-    } finally {
-        setLoading(false);
-    }
-};
-
-useEffect(() => {
-    loadOrder();
-}, [id]);
-
-const handleCancelOrder = () => {
-    Alert.alert(
-        "Cancelar pedido",
-        "¿Estás seguro de que quieres cancelar este pedido?",
-        [
-            {
-                text: "No",
-                style: "cancel"
-            },
+    const handleCancel = () => {
+        if (!order || cancelling) return;
+        Alert.alert("Cancelar pedido", "¿Seguro que quieres cancelar este pedido?", [
+            { text: "No", style: "cancel" },
             {
                 text: "Sí, cancelar",
                 style: "destructive",
                 onPress: async () => {
+                    setCancelling(true);
                     try {
-                        await cancelOrder(order.$id);
-
-                        setOrder({
-                            ...order,
-                            status: "cancelled"
-                        });
-
-                        Alert.alert(
-                            "Pedido cancelado",
-                            "Tu pedido ha sido cancelado correctamente."
-                        );
-                    } catch (error) {
-                        console.log(
-                            "Error al cancelar pedido:",
-                            error
-                        );
-
-                        Alert.alert(
-                            "Error",
-                            "No se pudo cancelar el pedido."
-                        );
+                        await cancelMyOrder(order);
+                        // El estado nuevo llega por suscripción / consulta periódica.
+                    } catch (e: any) {
+                        Alert.alert("No se pudo cancelar", e?.message ?? "Inténtalo de nuevo.");
+                    } finally {
+                        setCancelling(false);
                     }
                 }
             }
-        ]
-    );
-};
+        ]);
+    };
 
-if (loading) {
+    if (loading) {
+        return (
+            <View className="flex-1 items-center justify-center bg-white">
+                <ActivityIndicator size="large" color="#FF9C01" />
+            </View>
+        );
+    }
+
+    if (!order) {
+        return (
+            <SafeAreaView className="flex-1 items-center justify-center bg-white px-8">
+                <Text className="text-center text-gray-400">{error ?? "No encontramos este pedido."}</Text>
+                <TouchableOpacity onPress={() => router.back()} className="mt-5 rounded-xl bg-primary px-6 py-3">
+                    <Text className="font-bold text-white">Volver</Text>
+                </TouchableOpacity>
+            </SafeAreaView>
+        );
+    }
+
+    const meta = getStatusMeta(order.rawStatus);
+
     return (
-        <View className="flex-1 items-center justify-center bg-white">
-            <ActivityIndicator
-                size="large"
-                color="#FF9C01"
-            />
-
-            <Text className="mt-3 text-gray-400">
-                Cargando pedido...
-            </Text>
-        </View>
-    );
-}
-
-if (!order) {
-    return (
-        <View className="flex-1 items-center justify-center bg-white px-5">
-
-            <Text className="text-xl font-bold text-dark-100">
-                Pedido no encontrado
-            </Text>
-
-            <TouchableOpacity
-                onPress={() => router.back()}
-                className="mt-5 rounded-xl bg-primary px-6 py-3"
-            >
-                <Text className="font-bold text-white">
-                    Regresar
-                </Text>
-            </TouchableOpacity>
-
-        </View>
-    );
-}
-
-const statusText =
-    order.status === "pending"
-        ? "Pendiente"
-        : order.status === "confirmed"
-        ? "Confirmado"
-        : order.status === "preparing"
-        ? "Preparando"
-        : order.status === "delivered"
-        ? "Entregado"
-        : order.status === "cancelled"
-        ? "Cancelado"
-        : order.status;
-
-const statusIcon =
-    order.status === "delivered"
-        ? "checkmark-circle"
-        : order.status === "cancelled"
-        ? "close-circle"
-        : order.status === "preparing"
-        ? "restaurant"
-        : "time";
-
-const statusColor =
-    order.status === "cancelled"
-        ? "#EF4444"
-        : "#FF9C01";
-
-return (
-    <View className="flex-1 bg-white">
-
-        {/* ENCABEZADO */}
-        <View className="px-5 pb-5 pt-14">
-
-            <TouchableOpacity
-                onPress={() => router.back()}
-                className="mb-5 h-10 w-10 items-center justify-center rounded-full bg-gray-100"
-            >
-                <Ionicons
-                    name="arrow-back"
-                    size={22}
-                    color="#221F1F"
-                />
-            </TouchableOpacity>
-
-            <Text className="text-3xl font-bold text-dark-100">
-                Detalle del pedido
-            </Text>
-
-            <Text className="mt-2 text-base text-gray-400">
-                Pedido #{order.$id.slice(-6)}
-            </Text>
-
-            <Text className="mt-1 text-sm text-gray-400">
-                {new Date(
-                    order.$createdAt
-                ).toLocaleDateString("es-MX", {
-                    day: "2-digit",
-                    month: "long",
-                    year: "numeric"
-                })}
-            </Text>
-
-        </View>
-
-        <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{
-                paddingHorizontal: 20,
-                paddingBottom: 40
-            }}
-        >
-
-            {/* ESTADO */}
-            <View className="mb-5 rounded-2xl bg-orange-50 p-5">
-
-                <View className="flex-row items-center">
-
-                    <View className="h-12 w-12 items-center justify-center rounded-full bg-white">
-
-                        <Ionicons
-                            name={statusIcon as any}
-                            size={25}
-                            color={statusColor}
-                        />
-
-                    </View>
-
-                    <View className="ml-4">
-
-                        <Text className="text-sm text-gray-400">
-                            Estado del pedido
-                        </Text>
-
-                        <Text
-                            className="mt-1 text-xl font-bold"
-                            style={{
-                                color: statusColor
-                            }}
-                        >
-                            {statusText}
-                        </Text>
-
-                    </View>
-
+        <SafeAreaView className="flex-1 bg-white">
+            <ScrollView contentContainerClassName="px-5 pb-12" showsVerticalScrollIndicator={false}>
+                <View className="flex-row items-center pt-3 mb-6">
+                    <TouchableOpacity onPress={() => router.back()} className="size-10 rounded-full bg-gray-100 items-center justify-center" accessibilityLabel="Volver">
+                        <Ionicons name="arrow-back" size={22} color="#181C2E" />
+                    </TouchableOpacity>
+                    <Text className="flex-1 text-center h3-bold text-dark-100 mr-10">Pedido #{order.id.slice(-6)}</Text>
                 </View>
 
-            </View>
-
-            {/* PRODUCTOS */}
-            <View className="mb-5 rounded-2xl border border-gray-100 bg-white p-5">
-
-                <Text className="mb-5 text-xl font-bold text-dark-100">
-                    Productos
-                </Text>
-
-                {order.items?.map(
-                    (orderItem: any) => {
-
-                        let extras: any[] = [];
-
-                        try {
-                            extras =
-                                typeof orderItem.customizations ===
-                                "string"
-                                    ? JSON.parse(
-                                          orderItem.customizations
-                                      )
-                                    : orderItem.customizations ??
-                                      [];
-                        } catch {
-                            extras = [];
-                        }
-
-                        const unitPrice =
-                            Number(
-                                orderItem.price
-                            );
-
-                        const quantity =
-                            Number(
-                                orderItem.quantity
-                            );
-
-                        const subtotal =
-                            unitPrice *
-                            quantity;
-
-                        return (
-                            <View
-                                key={
-                                    orderItem.$id
-                                }
-                                className="mb-5 border-b border-gray-100 pb-5"
-                            >
-
-                                <View className="flex-row justify-between">
-
-                                    <View className="flex-1 pr-4">
-
-                                        <Text className="text-base font-bold text-dark-100">
-                                            {
-                                                orderItem.name
-                                            }
-                                        </Text>
-
-                                        <Text className="mt-1 text-sm text-gray-400">
-                                            {quantity}{" "}
-                                            {quantity ===
-                                            1
-                                                ? "unidad"
-                                                : "unidades"}
-                                        </Text>
-
-                                        {quantity >
-                                            1 && (
-                                            <Text className="mt-1 text-xs text-gray-400">
-                                                $
-                                                {unitPrice.toFixed(
-                                                    2
-                                                )}{" "}
-                                                c/u
-                                            </Text>
-                                        )}
-
-                                        {extras.length >
-                                            0 && (
-                                            <View className="mt-3">
-
-                                                <Text className="text-sm font-semibold text-gray-500">
-                                                    Extras
-                                                </Text>
-
-                                                {extras.map(
-                                                    (
-                                                        extra: any
-                                                    ) => (
-                                                        <Text
-                                                            key={
-                                                                extra.id
-                                                            }
-                                                            className="mt-1 text-sm text-gray-400"
-                                                        >
-                                                            •{" "}
-                                                            {
-                                                                extra.name
-                                                            }{" "}
-                                                            (+$
-                                                            {Number(
-                                                                extra.price
-                                                            ).toFixed(
-                                                                2
-                                                            )}
-                                                            )
-                                                        </Text>
-                                                    )
-                                                )}
-
-                                            </View>
-                                        )}
-
-                                    </View>
-
-                                    <Text className="text-base font-bold text-primary">
-                                        $
-                                        {subtotal.toFixed(
-                                            2
-                                        )}
-                                    </Text>
-
-                                </View>
-
-                            </View>
-                        );
-                    }
+                {stale && error && (
+                    <Text className="small-regular text-red-500 mb-3">{error} Mostrando la última información disponible.</Text>
                 )}
 
-            </View>
+                <View className="flex-row items-center justify-between mb-2">
+                    <OrderStatusBadge status={order.rawStatus} />
+                </View>
+                <Text className="small-regular text-gray-200 mb-1">Creado: {fmtDate(order.createdAt) ?? "—"}</Text>
+                {order.updatedAt && order.updatedAt !== order.createdAt && (
+                    <Text className="small-regular text-gray-200 mb-1">Actualizado: {fmtDate(order.updatedAt)}</Text>
+                )}
+                {order.status === null && (
+                    <Text className="small-regular text-gray-200 mb-1">{meta.description} (valor recibido: “{order.rawStatus || "vacío"}”)</Text>
+                )}
 
-            {/* RESUMEN */}
-            <View className="mb-5 rounded-2xl border border-gray-100 bg-white p-5">
-
-                <Text className="mb-5 text-xl font-bold text-dark-100">
-                    Resumen del pago
-                </Text>
-
-                <View className="mb-3 flex-row justify-between">
-
-                    <Text className="text-sm text-gray-400">
-                        Envío
-                    </Text>
-
-                    <Text className="text-sm text-dark-100">
-                        $
-                        {Number(
-                            order.deliveryFee
-                        ).toFixed(2)}
-                    </Text>
-
+                <View className="mt-6">
+                    <OrderStatusTimeline status={order.rawStatus} />
                 </View>
 
-                <View className="mb-4 flex-row justify-between">
+                {isTrackable(order.status) && (
+                    <TouchableOpacity
+                        onPress={() => router.push({ pathname: "/order/tracking/[id]", params: { id: order.id } })}
+                        className="bg-primary rounded-full py-4 mt-2"
+                        accessibilityRole="button"
+                    >
+                        <Text className="text-white text-center paragraph-bold">Seguir mi pedido en el mapa</Text>
+                    </TouchableOpacity>
+                )}
 
-                    <Text className="text-sm text-gray-400">
-                        Descuento
-                    </Text>
-
-                    <Text className="text-sm text-green-600">
-                        -$
-                        {Number(
-                            order.discount
-                        ).toFixed(2)}
-                    </Text>
-
-                </View>
-
-                <View className="flex-row justify-between border-t border-gray-100 pt-4">
-
-                    <Text className="text-lg font-bold text-dark-100">
-                        Total
-                    </Text>
-
-                    <Text className="text-2xl font-bold text-primary">
-                        $
-                        {Number(
-                            order.total
-                        ).toFixed(2)}
-                    </Text>
-
-                </View>
-
-            </View>
-
-            {/* MÉTODO DE PAGO */}
-            <View className="mb-5 rounded-2xl border border-gray-100 bg-white p-5">
-
-                <Text className="mb-4 text-xl font-bold text-dark-100">
-                    Método de pago
-                </Text>
-
-                <View className="flex-row items-center">
-
-                    <View className="h-11 w-11 items-center justify-center rounded-full bg-orange-50">
-
-                        <Ionicons
-                            name="cash-outline"
-                            size={23}
-                            color="#FF9C01"
-                        />
-
+                <Text className="h3-bold text-dark-100 mt-8 mb-3">Productos</Text>
+                <View className="border border-gray-200 rounded-2xl p-5">
+                    {order.items.length === 0 && <Text className="text-gray-400">No hay productos registrados.</Text>}
+                    {order.items.map((item) => (
+                        <View key={item.id} className="mb-4 flex-row justify-between">
+                            <View className="flex-1 pr-3">
+                                <Text className="base-bold text-dark-100">{item.name}</Text>
+                                <Text className="small-regular text-gray-200 mt-1">Cantidad: {item.quantity} · {formatMoney(item.unitPrice)} c/u</Text>
+                                {item.extras.length > 0 && (
+                                    <Text className="small-regular text-gray-200 mt-1">
+                                        Extras: {item.extras.map((e) => `${e.name} (+${formatMoney(e.price)})`).join(", ")}
+                                    </Text>
+                                )}
+                            </View>
+                            <Text className="base-bold text-primary">{formatMoney(item.lineTotal)}</Text>
+                        </View>
+                    ))}
+                    <View className="border-t border-gray-200 pt-3">
+                        {order.subtotal !== null && (
+                            <View className="flex-row justify-between mb-1">
+                                <Text className="text-gray-200">Subtotal</Text>
+                                <Text className="text-dark-100">{formatMoney(order.subtotal)}</Text>
+                            </View>
+                        )}
+                        <View className="flex-row justify-between mb-1">
+                            <Text className="text-gray-200">Envío</Text>
+                            <Text className="text-dark-100">{formatMoney(order.deliveryFee)}</Text>
+                        </View>
+                        <View className="flex-row justify-between mb-2">
+                            <Text className="text-gray-200">Descuento</Text>
+                            <Text className="text-green-600">-{formatMoney(order.discount)}</Text>
+                        </View>
+                        <View className="flex-row justify-between">
+                            <Text className="base-bold text-dark-100">Total</Text>
+                            <Text className="h3-bold text-primary">{formatMoney(order.total)}</Text>
+                        </View>
                     </View>
-
-                    <Text className="ml-3 text-base text-gray-500">
-                        {order.paymentMethod ===
-                        "cash_on_delivery"
-                            ? "Efectivo contra entrega"
-                            : order.paymentMethod}
-                    </Text>
-
                 </View>
 
-            </View>
+                <Text className="h3-bold text-dark-100 mt-8 mb-3">Entrega</Text>
+                <View className="border border-gray-200 rounded-2xl p-5">
+                    <View className="flex-row items-start">
+                        <Ionicons name="location-outline" size={22} color="#FE8C00" />
+                        <Text className="ml-3 flex-1 paragraph-regular text-dark-100">
+                            {order.deliveryAddress?.line ?? "Dirección no registrada en este pedido."}
+                        </Text>
+                    </View>
+                    {order.driverName && (
+                        <Text className="small-regular text-gray-200 mt-3">Repartidor: {order.driverName}</Text>
+                    )}
+                </View>
 
-            {/* CANCELAR PEDIDO */}
-            {order.status === "pending" && (
-                <TouchableOpacity
-                    onPress={handleCancelOrder}
-                    activeOpacity={0.8}
-                    className="mb-3 items-center rounded-2xl border border-red-200 bg-red-50 py-4"
-                >
-                    <Text className="text-base font-bold text-red-500">
-                        Cancelar pedido
-                    </Text>
-                </TouchableOpacity>
-            )}
-
-            {/* REGRESAR */}
-            <TouchableOpacity
-                onPress={() => router.back()}
-                activeOpacity={0.8}
-                className="items-center rounded-2xl bg-primary py-4"
-            >
-                <Text className="text-base font-bold text-white">
-                    Volver a mis pedidos
-                </Text>
-            </TouchableOpacity>
-
-        </ScrollView>
-
-    </View>
-);
-
-
+                {canCustomerCancel(order.status) && (
+                    <TouchableOpacity
+                        onPress={handleCancel}
+                        disabled={cancelling}
+                        className="mt-8 rounded-full border border-red-400 py-4"
+                        accessibilityRole="button"
+                    >
+                        {cancelling ? <ActivityIndicator color="#EF4444" /> : (
+                            <Text className="text-center paragraph-bold text-red-500">Cancelar pedido</Text>
+                        )}
+                    </TouchableOpacity>
+                )}
+            </ScrollView>
+        </SafeAreaView>
+    );
 };
 
-export default OrderDetails;
+export default OrderDetail;

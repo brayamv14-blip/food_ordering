@@ -105,3 +105,11 @@ food_ordering/
 ## Proyecto
 
 Este proyecto fue desarrollado como parte de un proyecto académico para practicar el desarrollo de aplicaciones móviles con React Native, Expo, TypeScript y Appwrite.
+
+## Documentación técnica
+- `docs/STRIPE.md` – pagos con Stripe Checkout, webhook, reembolsos, tarjetas de prueba.
+- `docs/NOTIFICACIONES.md` – push reales con Firebase + Appwrite Messaging.
+- `docs/MAPAS.md` – Geoapify + OpenStreetMap + Leaflet (WebView).
+- `docs/APPWRITE.md` – esquema, Functions, variables y permisos.
+- `PATCH-LEEME.md` – instalación, configuración y qué falta verificar.
+- Expo Go sirve para el flujo de pedidos, pagos (Checkout en el navegador) y mapas; las **notificaciones push remotas en Android requieren una build de desarrollo** (`npx eas-cli build --platform android --profile development`).

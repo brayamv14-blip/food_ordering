@@ -1,10 +1,11 @@
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
     Image,
     ScrollView,
+    Switch,
     Text,
     TouchableOpacity,
     View
@@ -13,12 +14,18 @@ import { router, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import {
-    getCurrentUser
+    getCurrentUser,
+    signOut
 } from "@/lib/appwrite";
+import useAuthStore from "@/store/auth.store";
+import { Roles, getMyRoles } from "@/lib/services/roles";
+import { isPushRegistered, registerForPush, unregisterPush } from "@/lib/services/notifications.service";
 
 const Profile = () => {
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
+    const [roles, setRoles] = useState<Roles>({ staff: false, driver: false });
+    const [pushBusy, setPushBusy] = useState(false);
 
     const loadProfile = async () => {
         try {
@@ -27,6 +34,8 @@ const Profile = () => {
             const currentUser = await getCurrentUser();
 
             setUser(currentUser);
+            // Solo decide que accesos mostrar; el servidor autoriza cada operacion.
+            setRoles(await getMyRoles());
         } catch (error) {
             console.log(
                 "Error al cargar perfil:",
@@ -47,6 +56,43 @@ const Profile = () => {
             loadProfile();
         }, [])
     );
+
+    const [pushOn, setPushOn] = useState(false);
+    useEffect(() => {
+        let alive = true;
+        isPushRegistered().then((v) => alive && setPushOn(v));
+        return () => {
+            alive = false;
+        };
+    }, [user?.$id]);
+
+    const togglePush = async (enable: boolean) => {
+        if (!user || pushBusy) return;
+        setPushBusy(true);
+        try {
+            if (!enable) {
+                if (await unregisterPush()) setPushOn(false);
+                else Alert.alert("Notificaciones", "No pudimos desactivarlas ahora. Revisa tu conexión e inténtalo de nuevo.");
+                return;
+            }
+            const r = await registerForPush();
+            if (r.status === "registered") {
+                setPushOn(true);
+            } else if (r.status === "denied") {
+                Alert.alert("Notificaciones", "Para avisarte de tus pedidos necesitamos el permiso de notificaciones. Puedes activarlo en los ajustes del teléfono.");
+            } else if (r.status === "not_configured") {
+                Alert.alert("Notificaciones", "Falta configurar el proveedor de notificaciones (EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID). Consulta docs/NOTIFICACIONES.md.");
+            } else if (r.status === "unsupported") {
+                Alert.alert("Notificaciones", "Las notificaciones push están disponibles en Android.");
+            } else if (r.status === "offline") {
+                Alert.alert("Notificaciones", "Sin conexión. Inténtalo de nuevo cuando tengas internet.");
+            } else {
+                Alert.alert("Notificaciones", "No se pudieron activar en este dispositivo. Inténtalo de nuevo más tarde.");
+            }
+        } finally {
+            setPushBusy(false);
+        }
+    };
 
     if (loading) {
         return (
@@ -94,12 +140,7 @@ const Profile = () => {
                     </Text>
 
                     <TouchableOpacity
-                        onPress={() => {
-                            Alert.alert(
-                                "Buscar",
-                                "La búsqueda estará disponible próximamente."
-                            );
-                        }}
+                        onPress={() => router.push("/search")}
                         className="h-10 w-10 items-center justify-center rounded-full bg-gray-100"
                     >
                         <Ionicons
@@ -131,22 +172,6 @@ const Profile = () => {
                                 </View>
                             )}
                         </View>
-
-                        <TouchableOpacity
-                            onPress={() => {
-                                Alert.alert(
-                                    "Foto de perfil",
-                                    "La edición de foto estará disponible próximamente."
-                                );
-                            }}
-                            className="absolute bottom-0 right-0 h-9 w-9 items-center justify-center rounded-full bg-primary"
-                        >
-                            <Ionicons
-                                name="pencil"
-                                size={17}
-                                color="white"
-                            />
-                        </TouchableOpacity>
                     </View>
 
                     <Text className="mt-4 text-2xl font-bold text-dark-100">
@@ -220,8 +245,8 @@ const Profile = () => {
                                     Número de teléfono
                                 </Text>
 
-                                <Text className="mt-1 text-base font-semibold text-gray-400">
-                                    Próximamente
+                                <Text className="mt-1 text-base font-semibold text-dark-100">
+                                    {user?.phone || "No has agregado un teléfono"}
                                 </Text>
                             </View>
                         </View>
@@ -236,12 +261,7 @@ const Profile = () => {
                         </Text>
 
                         <TouchableOpacity
-                            onPress={() => {
-                                Alert.alert(
-                                    "Direcciones",
-                                    "Aquí podrás agregar y administrar tus direcciones."
-                                );
-                            }}
+                            onPress={() => router.push("/edit-profile")}
                         >
                             <Text className="font-semibold text-primary">
                                 Administrar
@@ -266,7 +286,7 @@ const Profile = () => {
                                 </Text>
 
                                 <Text className="mt-1 text-sm text-gray-400">
-                                    No has agregado una dirección.
+                                    {user?.address1 || "No has agregado una dirección."}
                                 </Text>
                             </View>
 
@@ -295,7 +315,7 @@ const Profile = () => {
                                 </Text>
 
                                 <Text className="mt-1 text-sm text-gray-400">
-                                    No has agregado una dirección.
+                                    {user?.address2 || "No has agregado una dirección."}
                                 </Text>
                             </View>
 
@@ -352,6 +372,57 @@ const Profile = () => {
                     />
                 </TouchableOpacity>
 
+                {/* NOTIFICACIONES DE PEDIDOS (opt-in) */}
+                <View className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+                    <View className="flex-1 flex-row items-center pr-3">
+                        <View className="h-11 w-11 items-center justify-center rounded-full bg-orange-50">
+                            <Ionicons name="notifications-outline" size={22} color="#FF9C01" />
+                        </View>
+                        <View className="ml-3 flex-1">
+                            <Text className="text-base font-bold text-dark-100">Notificaciones de pedidos</Text>
+                            <Text className="text-xs text-gray-400">Te avisamos cuando cambie el estado de tu pedido.</Text>
+                        </View>
+                    </View>
+                    <Switch
+                        value={pushOn}
+                        onValueChange={togglePush}
+                        disabled={pushBusy}
+                        accessibilityLabel="Activar notificaciones de pedidos"
+                    />
+                </View>
+
+                {/* ACCESOS POR ROL (la autorización real está en el servidor) */}
+                {roles.staff && (
+                    <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => router.push("/admin")}
+                        className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm"
+                    >
+                        <View className="flex-row items-center">
+                            <View className="h-11 w-11 items-center justify-center rounded-full bg-blue-50">
+                                <Ionicons name="clipboard-outline" size={22} color="#3B82F6" />
+                            </View>
+                            <Text className="ml-3 text-base font-bold text-dark-100">Administrar pedidos</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+                {roles.driver && (
+                    <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => router.push("/driver")}
+                        className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm"
+                    >
+                        <View className="flex-row items-center">
+                            <View className="h-11 w-11 items-center justify-center rounded-full bg-purple-50">
+                                <Ionicons name="bicycle-outline" size={22} color="#8B5CF6" />
+                            </View>
+                            <Text className="ml-3 text-base font-bold text-dark-100">Mis entregas</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+
                 {/* LOGOUT */}
                 <TouchableOpacity
                     activeOpacity={0.8}
@@ -367,13 +438,19 @@ const Profile = () => {
                                 {
                                     text: "Cerrar sesión",
                                     style: "destructive",
-                                    onPress: () => {
-                                        // Aquí conectaremos el logout
-                                        // con tu auth store.
-                                        Alert.alert(
-                                            "Próximamente",
-                                            "Aquí conectaremos el cierre de sesión."
-                                        );
+                                    onPress: async () => {
+                                        try {
+                                            // Este dispositivo deja de recibir avisos de la cuenta que se cierra.
+                                            if (pushOn) await unregisterPush();
+                                            await signOut();
+                                        } catch (e) {
+                                            console.log("Error al cerrar sesión:", e);
+                                        } finally {
+                                            // Aunque falle la red, se limpia el estado local.
+                                            useAuthStore.getState().setUser(null);
+                                            useAuthStore.getState().setIsAuthenticated(false);
+                                            router.replace("/sign-in");
+                                        }
                                     }
                                 }
                             ]
