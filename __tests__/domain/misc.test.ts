@@ -36,9 +36,11 @@ describe("acciones del administrador", () => {
         expect(getStaffActions(undefined, true)).toEqual([]);
     });
     it("no permite enviar a reparto sin repartidor y marca cancelar como destructivo", () => {
-        const [a] = getStaffActions("preparing", false);
+        const a = getStaffActions("preparing", false).find((x) => x.to === "on_the_way");
+        expect(getStaffActions("preparing", false).find((x) => x.to === "ready")?.disabledReason).toBeUndefined();
         expect(a).toMatchObject({ to: "on_the_way", disabledReason: expect.any(String) });
-        expect(getStaffActions("preparing", true)[0].disabledReason).toBeUndefined();
+        expect(getStaffActions("preparing", true).find((x) => x.to === "on_the_way")?.disabledReason).toBeUndefined();
+        expect(getStaffActions("delivery_failed", true).map((x) => x.to)).toEqual(["on_the_way", "cancelled"]);
         expect(getStaffActions("pending", true).find((x) => x.to === "cancelled")?.destructive).toBe(true);
     });
     it("solo se asigna repartidor a pedidos no finalizados", () => {

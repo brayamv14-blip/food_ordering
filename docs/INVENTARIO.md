@@ -16,7 +16,7 @@
 - Panel de personal: pedidos y asignación sí; **no** hay CRUD de productos/categorías/usuarios, reportes ni historial de pagos en la app (se gestionan en la consola de Appwrite / Stripe Dashboard).
 
 **Ausente (no implementado; requiere cambios de modelo de datos y de máquina de estados)**
-- Estados "listo para recoger" y "recogido", aceptar/rechazar asignación, entrega fallida, disponibilidad del repartidor y asignación automática.
+- Estado "recogido", aceptar/rechazar asignación, disponibilidad del repartidor y asignación automática ("listo para recoger" y "entrega fallida" se agregaron en v7).
 - Cupones, múltiples restaurantes, reembolsos parciales, reportes/indicadores.
 
 **Bloqueado por configuración externa (no verificable aquí)**

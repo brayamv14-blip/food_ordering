@@ -9,8 +9,12 @@
 const TRANSITIONS = {
     pending: ['confirmed', 'cancelled'],
     confirmed: ['preparing', 'cancelled'],
-    preparing: ['on_the_way'],
-    on_the_way: ['delivered'],
+    // `ready` (listo para recoger) es opcional: se puede pasar de preparing a on_the_way directamente.
+    preparing: ['ready', 'on_the_way'],
+    ready: ['on_the_way'],
+    on_the_way: ['delivered', 'delivery_failed'],
+    // Entrega fallida: el personal decide reintentar (on_the_way) o cancelar (con reembolso si estaba pagado).
+    delivery_failed: ['on_the_way', 'cancelled'],
     delivered: [],
     cancelled: []
 };
@@ -34,9 +38,9 @@ function canActorTransition({ actor, isOwner, from, to, hasDriver = true, paymen
     }
     if (actor === 'staff') return { ok: true };
     if (actor === 'driver') {
-        if ((from === 'preparing' && to === 'on_the_way') || (from === 'on_the_way' && to === 'delivered')) {
-            return { ok: true };
-        }
+        const ok = (from === 'preparing' && to === 'on_the_way') || (from === 'ready' && to === 'on_the_way') ||
+            (from === 'on_the_way' && (to === 'delivered' || to === 'delivery_failed'));
+        if (ok) return { ok: true };
         return { ok: false, code: 'forbidden', error: 'Un repartidor no puede hacer ese cambio.' };
     }
     // cliente
@@ -136,6 +140,16 @@ function validateAddressInput(address) {
     return { ok: true, line, label, latitude, longitude };
 }
 
+/** Maximo de pedidos en linea sin pagar por usuario (evita abusar de sesiones de Stripe). */
+const MAX_OPEN_UNPAID = 5;
+
+/** Cuenta los pedidos en linea pendientes de pago entre las filas recientes del usuario. */
+function countOpenUnpaid(rows) {
+    return (Array.isArray(rows) ? rows : []).filter(
+        (o) => o && o.paymentMethod === 'online' && o.status === 'pending' && (o.paymentStatus || 'pending') === 'pending'
+    ).length;
+}
+
 /** Distancia en km (haversine) entre dos puntos {latitude, longitude}. */
 function distanceKm(a, b) {
     const R = 6371;
@@ -176,8 +190,8 @@ function validatePhone(raw) {
     return { ok: true, phone };
 }
 
-const ACTIVE_DELIVERY = ['preparing', 'on_the_way'];
-const ASSIGNABLE = ['pending', 'confirmed', 'preparing', 'on_the_way'];
+const ACTIVE_DELIVERY = ['preparing', 'ready', 'on_the_way', 'delivery_failed'];
+const ASSIGNABLE = ['pending', 'confirmed', 'preparing', 'ready', 'on_the_way', 'delivery_failed'];
 const TERMINAL = ['delivered', 'cancelled'];
 
 /** Un pedido solo puede (re)asignarse a un repartidor mientras no sea final. */
@@ -451,6 +465,8 @@ const isStripeCheckoutUrl = (url) => {
 const STATUS_MESSAGES = {
     confirmed: ['Pedido confirmado', 'El restaurante confirmó tu pedido.'],
     preparing: ['Preparando tu pedido', 'Estamos preparando tus alimentos.'],
+    ready: ['Tu pedido está listo', 'Ya está listo para que el repartidor lo recoja.'],
+    delivery_failed: ['No pudimos entregar tu pedido', 'El restaurante se pondrá en contacto contigo.'],
     on_the_way: ['¡Tu pedido va en camino!', 'Puedes seguir al repartidor en el mapa.'],
     delivered: ['Pedido entregado', 'Buen provecho.'],
     cancelled: ['Pedido cancelado', 'Tu pedido fue cancelado.']
@@ -498,7 +514,7 @@ function buildPushRequest(accountId, message) {
 export {
     TRANSITIONS, ACTIVE_DELIVERY, ASSIGNABLE, TERMINAL,
     canActorTransition, priceOrder, validateDriverPosition,
-    validateAddressInput, validatePhone, distanceKm, checkCoverage, canAssignDriver, toStaffOrderView,
+    validateAddressInput, validatePhone, distanceKm, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID, canAssignDriver, toStaffOrderView,
     checkExpected, parseDateRange, matchesOrderQuery, buildOrderEvent, isMenuAvailable,
     PAYMENT_METHODS, PAYMENT_STATUSES, PAYMENT_TRANSITIONS, CURRENCY, validatePaymentMethod, movePaymentStatus,
     buildCheckoutSessionParams, formEncode, checkSessionPayment, paymentIntentId,

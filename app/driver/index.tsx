@@ -123,11 +123,11 @@ const DriverDeliveries = () => {
         setSharingId(orderId);
     };
 
-    const setStatus = async (o: StaffOrder, to: "on_the_way" | "delivered") => {
+    const setStatus = async (o: StaffOrder, to: "on_the_way" | "delivered" | "delivery_failed") => {
         if (busyId) return;
         setBusyId(o.id);
         try {
-            if (to === "delivered") stopSharing();
+            if (to !== "on_the_way") stopSharing();
             await changeOrderStatus(o.id, to);
             await load();
         } catch (e) {
@@ -205,7 +205,7 @@ const DriverDeliveries = () => {
 
                             {tab === "active" && (
                                 <View className="mt-3 flex-row">
-                                    {restaurant && o.status === "preparing" && (
+                                    {restaurant && (o.status === "preparing" || o.status === "ready") && (
                                         <TouchableOpacity onPress={() => navigateTo(restaurant.location)} className="mr-2 flex-row items-center rounded-xl border border-primary px-3 py-2" accessibilityRole="button" accessibilityLabel="Navegar al restaurante">
                                             <Ionicons name="storefront-outline" size={16} color="#FF9C01" />
                                             <Text className="ml-1 font-semibold text-primary">Ir al restaurante</Text>
@@ -223,9 +223,9 @@ const DriverDeliveries = () => {
                                 </View>
                             )}
 
-                            {o.status === "preparing" && tab === "active" && (
+                            {(o.status === "preparing" || o.status === "ready" || o.status === "delivery_failed") && tab === "active" && (
                                 <TouchableOpacity onPress={() => setStatus(o, "on_the_way")} disabled={busy} className="mt-3 items-center rounded-xl bg-primary py-3">
-                                    {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text className="font-bold text-white">Salir a reparto</Text>}
+                                    {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text className="font-bold text-white">{o.status === "delivery_failed" ? "Reintentar entrega" : "Salir a reparto"}</Text>}
                                 </TouchableOpacity>
                             )}
                             {o.status === "on_the_way" && tab === "active" && (
@@ -239,6 +239,17 @@ const DriverDeliveries = () => {
                                     </TouchableOpacity>
                                     <TouchableOpacity onPress={() => setStatus(o, "delivered")} disabled={busy} className="mt-2 items-center rounded-xl border border-green-500 py-3">
                                         {busy ? <ActivityIndicator color="#22C55E" /> : <Text className="font-bold text-green-600">Marcar entregado</Text>}
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                        onPress={() => Alert.alert("Entrega fallida", "¿No pudiste entregar el pedido? El restaurante será avisado.", [
+                                            { text: "Cancelar", style: "cancel" },
+                                            { text: "Sí, registrar", style: "destructive", onPress: () => setStatus(o, "delivery_failed") }
+                                        ])}
+                                        disabled={busy}
+                                        className="mt-2 items-center rounded-xl border border-red-300 py-3"
+                                        accessibilityRole="button"
+                                    >
+                                        <Text className="font-bold text-red-500">No pude entregar</Text>
                                     </TouchableOpacity>
                                 </>
                             )}

@@ -90,3 +90,6 @@ Esto no confirma todavía el funcionamiento de los servicios reales, la instalac
 ## Novedades v6
 - Cobertura de entrega opcional (servidor), historial y navegación del repartidor, marcador del restaurante, mensajes claros de errores de validación. Ver `docs/INVENTARIO.md` para el estado real (implementado / incompleto / ausente / bloqueado) y `docs/APPWRITE.md` para las variables nuevas.
 - Appwrite Free permite 5 funciones por proyecto; este proyecto usa 3. Elimina `staff-api` y `update-driver-location` si siguen desplegadas.
+
+## Novedades v7
+Estados `ready` y `delivery_failed`, tope de pedidos en línea sin pagar, `scripts/verify-appwrite.mjs` (auditoría de solo lectura) y `docs/AUDITORIA-v7.md` (matriz). Migración: solo el índice `idx_status` (ver `docs/APPWRITE.md`).

@@ -110,6 +110,11 @@ export const PLAN = {
                 key: 'idx_driverUserId',
                 type: TablesDBIndexType.Key,
                 columns: ['driverUserId']
+            },
+            {
+                key: 'idx_status',
+                type: TablesDBIndexType.Key,
+                columns: ['status']
             }
         ]
     },

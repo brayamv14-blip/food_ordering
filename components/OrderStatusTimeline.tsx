@@ -14,7 +14,7 @@ const OrderStatusTimeline = ({ status }: { status: unknown }) => {
     const parsed = parseOrderStatus(status);
     const current = getProgressIndex(status);
 
-    if (parsed === "cancelled" || parsed === null) {
+    if (parsed === "cancelled" || parsed === "delivery_failed" || parsed === null) {
         const meta = getStatusMeta(status);
         return (
             <View className="flex-row items-center rounded-2xl p-4" style={{ backgroundColor: meta.background }}>

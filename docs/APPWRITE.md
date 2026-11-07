@@ -26,3 +26,9 @@ Appwrite Cloud Free permite **5 funciones por proyecto** (fuente: https://appwri
 
 ## Repartidor
 `myDeliveries` devuelve las entregas activas del repartidor autenticado; con `history: true`, sus entregas terminadas (entregado/cancelado). Las vistas de pedido para personal/repartidor incluyen `deliveryLatitude/deliveryLongitude` solo si el cliente confirmó coordenadas.
+
+## v7: estados nuevos, tope anti-abuso y auditoría de solo lectura
+- Estados `ready` y `delivery_failed`: `orders.status` es texto (varchar 255), **no hay migración de columna**. Transiciones: `preparing → ready | on_the_way`, `ready → on_the_way`, `on_the_way → delivered | delivery_failed`, `delivery_failed → on_the_way | cancelled` (solo personal; cancelar reembolsa si estaba pagado).
+- Índice nuevo `idx_status` en `orders`: `node scripts/appwrite-migrate.mjs` (vista previa) y luego `--apply`.
+- `create-order` rechaza con 429 (`too_many_open_orders`) al usuario con 5 pedidos en línea sin pagar.
+- `node scripts/verify-appwrite.mjs` (solo lectura) informa qué funciones están desplegadas, sus variables (solo nombres), columnas, índices y permisos reales.
