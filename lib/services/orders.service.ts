@@ -48,6 +48,8 @@ export interface CreateOrderResult {
     duplicate: boolean;
     /** Enlace de pago en linea (solo con paymentMethod = online). */
     checkoutUrl?: string;
+    /** Lo que el servidor realmente guardo (se compara con lo pedido). */
+    paymentMethod?: "cash_on_delivery" | "online";
 }
 
 /** Identificador de intento de checkout (no criptografico; sirve de llave de idempotencia). */
@@ -104,7 +106,7 @@ export async function createOrderIdempotent(
 
     // ---- Modo seguro: backend de confianza --------------------------------
     if (appwriteConfig.functions.createOrder) {
-        const result = await callBackendFunction<{ orderId: string; duplicate?: boolean; checkoutUrl?: string }>(
+        const result = await callBackendFunction<{ orderId: string; duplicate?: boolean; checkoutUrl?: string; paymentMethod?: string; backend?: string }>(
             appwriteConfig.functions.createOrder,
             {
                 clientRequestId: input.clientRequestId,
@@ -121,9 +123,19 @@ export async function createOrderIdempotent(
         if (!result?.orderId) {
             throw new OrderServiceError("bad_response", "Respuesta incompleta del servidor.");
         }
+        // Contrato de pago: si se pidio pago en linea, el servidor debe confirmar que lo guardo asi.
+        // Una Function desactualizada ignora `paymentMethod` y guarda efectivo en silencio: se detecta aqui.
+        if ((input.paymentMethod ?? "cash_on_delivery") === "online" && result.paymentMethod !== "online") {
+            throw new OrderServiceError(
+                "backend_outdated",
+                "El servidor registró el pedido sin pago en línea (la función create-order desplegada está desactualizada o mal configurada). " +
+                    `Cancela el pedido #${result.orderId.slice(-6)} desde Mis pedidos y avisa al administrador.`
+            );
+        }
         return {
             orderId: result.orderId,
             duplicate: !!result.duplicate,
+            ...(result.paymentMethod === "online" || result.paymentMethod === "cash_on_delivery" ? { paymentMethod: result.paymentMethod } : {}),
             ...(typeof result.checkoutUrl === "string" ? { checkoutUrl: result.checkoutUrl } : {})
         };
     }

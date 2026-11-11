@@ -44,7 +44,7 @@ describe("admin.service", () => {
     it("disponibilidad, usuarios y roles llaman a sus acciones", async () => {
         mockCall.mockResolvedValue({ product: { id: "p1", available: false }, users: [{ id: "u1" }], labels: ["staff"] });
         await setProductAvailability("p1", false);
-        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setAvailability", productId: "p1", available: false });
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setProductAvailability", productId: "p1", available: false });
         expect(await listUsers("ana")).toEqual([{ id: "u1" }]);
         expect(await setUserRoles("u1", ["staff"])).toEqual(["staff"]);
         expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setRole", userId: "u1", labels: ["staff"] });

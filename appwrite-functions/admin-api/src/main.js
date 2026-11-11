@@ -9,7 +9,7 @@ import {
  * Administracion (productos, inventario, usuarios/roles, pagos y reportes). Contrato: campo `action` del JSON.
  *
  *   Personal (etiqueta `staff` o `admin`):
- *     listProducts, listCategories, setAvailability, adjustStock, stockMovements, listPayments, report
+ *     listProducts, listCategories, setProductAvailability, adjustStock, stockMovements, listPayments, report
  *   Solo administrador (etiqueta `admin`):
  *     saveProduct (crear/editar: precio, imagen, categoria, datos), listUsers, setRole
  *
@@ -122,7 +122,7 @@ export default async ({ req, res, log, error }) => {
                 return res.json({ product: productView(row) });
             }
 
-            case 'setAvailability': {
+            case 'setProductAvailability': {
                 if (typeof body.productId !== 'string' || typeof body.available !== 'boolean') return fail(res, 400, 'bad_request', 'Datos incompletos.');
                 const exists = await db.getRow({ databaseId: DB, tableId: MENU, rowId: body.productId }).catch(() => null);
                 if (!exists) return fail(res, 404, 'not_found', 'Producto no encontrado.');

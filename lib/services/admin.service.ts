@@ -77,7 +77,7 @@ export async function saveProduct(product: ProductInput, productId?: string): Pr
 }
 
 export async function setProductAvailability(productId: string, available: boolean): Promise<AdminProduct> {
-    return (await call<{ product: AdminProduct }>("setAvailability", { productId, available })).product;
+    return (await call<{ product: AdminProduct }>("setProductAvailability", { productId, available })).product;
 }
 
 /** `clientRequestId` evita aplicar dos veces el mismo ajuste si se reintenta por mala conexion. */

@@ -8,6 +8,7 @@ module.exports = {
     moduleNameMapper: {
         "^@/(.*)$": "<rootDir>/$1"
     },
+    setupFilesAfterEnv: ["<rootDir>/jest.setup.js"],
     collectCoverageFrom: [
         "lib/domain/**/*.ts",
         "lib/services/**/*.ts",

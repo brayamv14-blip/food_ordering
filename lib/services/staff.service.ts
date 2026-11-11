@@ -1,13 +1,12 @@
 import { appwriteConfig, callBackendFunction } from "@/lib/appwrite";
-import { OrderStatus } from "@/lib/domain/orderStatus";
-
+import type { OrderStatus } from "@/lib/domain/orderStatus";
 /**
  * Cliente de la Function `update-order-status` (cambios de estado, panel de
  * personal, repartidor y ubicacion). Una sola funcion, distinguida por `action`.
  */
 export interface StaffOrder {
     id: string;
-    status: string;
+status: OrderStatus;
     total: number;
     createdAt: string;
     /** Fecha de ultima actualizacion; se devuelve al servidor para detectar cambios ajenos. */
@@ -22,6 +21,10 @@ export interface StaffOrder {
     driverName: string | null;
     /** pending = asignado sin responder | accepted | null si no hay repartidor. */
     driverResponse?: "pending" | "accepted" | null;
+    /** Ultima ubicacion compartida por el repartidor (null si no hay). */
+    driverLatitude?: number | null;
+    driverLongitude?: number | null;
+    driverUpdatedAt?: string | null;
     items: { name: string; quantity: number }[];
 }
 

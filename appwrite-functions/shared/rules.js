@@ -225,6 +225,9 @@ function toStaffOrderView(order, items = []) {
         driverUserId: order.driverUserId || null,
         driverName: order.driverName || null,
         driverResponse: order.driverUserId ? (order.driverResponse || 'accepted') : null,
+        driverLatitude: order.driverUserId && typeof order.driverLatitude === 'number' ? order.driverLatitude : null,
+        driverLongitude: order.driverUserId && typeof order.driverLongitude === 'number' ? order.driverLongitude : null,
+        driverUpdatedAt: order.driverUserId ? (order.driverUpdatedAt || null) : null,
         items: items.map((i) => ({ name: i.name, quantity: i.quantity }))
     };
 }

@@ -444,7 +444,7 @@ r = await admin(mk('adm1', { action: 'saveProduct', product: { name: 'Malo', pri
 r = await admin(mk('adm1', { action: 'saveProduct', product: { name: 'Malo', price: 5, isAdmin: true, $permissions: ['any'] } })); check('admin: campos no permitidos se ignoran (lista blanca)', r.s === 200 && !('isAdmin' in store.menu.at(-1)) && !('$permissions' in store.menu.at(-1)), store.menu.at(-1));
 r = await admin(mk('adm1', { action: 'saveProduct', productId: taco.id, product: { price: 30, stock: 999 } })); check('admin edita precio; el stock no se cambia por saveProduct', r.s === 200 && r.b.product.price === 30 && r.b.product.stock === 10, r);
 r = await createOrder(mk('u1', other({ items: [{ menuId: taco.id, quantity: 1, price: 1 }] }))); check('el nuevo precio rige en los pedidos (30+5-0.5)', r.s === 200 && store.orders.find((o) => o.$id === r.b.orderId).total === 34.5, r);
-r = await admin(mk('staff1', { action: 'setAvailability', productId: taco.id, available: false })); check('staff desactiva producto', r.s === 200 && r.b.product.available === false, r);
+r = await admin(mk('staff1', { action: 'setProductAvailability', productId: taco.id, available: false })); check('staff desactiva producto', r.s === 200 && r.b.product.available === false, r);
 r = await createOrder(mk('u1', other({ items: [{ menuId: taco.id, quantity: 1 }] }))); check('producto desactivado no se puede pedir', r.s === 422 && r.b.code === 'unavailable', r);
 r = await admin(mk('staff1', { action: 'adjustStock', productId: taco.id, delta: -50 })); check('ajuste que dejaría stock negativo -> 422', r.s === 422, r);
 r = await admin(mk('staff1', { action: 'adjustStock', productId: taco.id, delta: 5, reason: 'compra', clientRequestId: 'adj_00000001' })); check('staff suma stock (9+5=14)', r.s === 200 && r.b.product.stock === 14, r);
@@ -636,6 +636,51 @@ r9 = await admin(mk('staff1', { action: 'saveProduct', product: { name: 'Hack', 
 r9 = await admin(mk('staff1', { action: 'setRole', userId: 'staff1', labels: ['admin'] })); check('el personal no se concede el rol admin -> 403', r9.s === 403 && !store.labels.staff1.includes('admin'), r9);
 r9 = await admin({ ...mk('staff1', { action: 'listProducts' }), req: { headers: { 'x-appwrite-user-id': 'staff1', 'x-appwrite-key': 'k' }, bodyText: '{no json' } }); check('JSON inválido -> 400 genérico', r9.s === 400 && !JSON.stringify(r9.b).includes('Unexpected'), r9);
 const adminLeak = await admin({ ...mk('staff1', { action: 'adjustStock', productId: 'bulk1', delta: 1 }), error() {} }); check('los errores no exponen detalles internos', !JSON.stringify(adminLeak.b).match(/stack|at \w+\.|node_modules/), adminLeak.b);
+}
+
+// ---- plan gratuito (2 funciones): update-order-status atiende estado + webhook de Stripe + administración
+{
+const two = (await import('./plan-gratuito/update-order-status/src/main.js')).default;
+const twoCreate = (await import('./plan-gratuito/create-order/src/main.js')).default;
+store.prefs = {};
+let q = await twoCreate(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] })));
+check('2 funciones: create-order crea pedido en línea', q.s === 200 && !!q.b.checkoutUrl, q);
+const po = store.orders.find((o) => o.$id === q.b.orderId);
+if (po) {
+  const ps = net.stripe.sessions[po.stripeSessionId]; payInStripe(ps.id, { amount: ps.amount_total });
+  const e2 = completed(po, ps);
+  q = await two(hk(e2)); check('2 funciones: el webhook de Stripe entra por update-order-status y marca pagado', q.s === 200 && po.paymentStatus === 'paid', [q.s, po.paymentStatus]);
+  q = await two(hk(e2)); check('2 funciones: webhook duplicado sin efecto doble', q.s === 200 && po.paymentStatus === 'paid', q);
+  q = await two(hk(e2, { 'stripe-signature': sign('{}', { secret: 'otro' }) })); check('2 funciones: firma falsa -> 400', q.s === 400, q);
+}
+q = await two(mk('staff1', { action: 'listProducts' })); check('2 funciones: admin listProducts por la misma función', q.s === 200 && Array.isArray(q.b.products), q);
+q = await two(mk('u1', { action: 'listProducts' })); check('2 funciones: cliente no entra a admin -> 403', q.s === 403, q);
+q = await two(mk('staff1', { action: 'setProductAvailability', productId: 'm2', available: false })); check('2 funciones: staff cambia disponibilidad de producto', q.s === 200 && q.b.product.available === false, q);
+q = await two(mk('drv1', { action: 'setAvailability', available: false })); check('2 funciones: repartidor cambia SU disponibilidad (no la del producto)', q.s === 200 && store.prefs.drv1?.driverAvailable === false, q);
+if (po) { q = await two(mk('staff1', { orderId: po.$id, status: 'confirmed' })); check('2 funciones: transición de estado sigue funcionando', q.s === 200 && po.status === 'confirmed', [q.s, q.b, po.status]); }
+}
+
+// ---- v10: contrato de pago, diagnóstico y mapa de personal
+{
+store.prefs = {};
+let q = await createOrder(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] })));
+check('v10: pedido en línea responde paymentMethod=online, pending y la versión', q.s === 200 && q.b.paymentMethod === 'online' && q.b.paymentStatus === 'pending' && q.b.backend === 'v10' && !!q.b.checkoutUrl, q);
+const saved = store.orders.find((o) => o.$id === q.b.orderId);
+check('v10: lo guardado coincide (online, pending, con sesión Stripe)', saved.paymentMethod === 'online' && saved.paymentStatus === 'pending' && !!saved.stripeSessionId, saved);
+const body2 = other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] });
+let a = await createOrder(mk('u1', body2)); let b = await createOrder(mk('u1', body2));
+check('v10: el reintento devuelve el mismo pedido y su método real (online)', a.b.orderId === b.b.orderId && b.b.duplicate === true && b.b.paymentMethod === 'online', [a.b, b.b]);
+q = await createOrder(mk('u1', other({ items: [{ menuId: 'm1', quantity: 1 }] })));
+check('v10: efectivo responde cash_on_delivery / not_required', q.s === 200 && q.b.paymentMethod === 'cash_on_delivery' && q.b.paymentStatus === 'not_required', q);
+q = await createOrder(mk('u1', { action: 'diag' }));
+check('v10: diag devuelve solo booleanos y la versión (sin valores)', q.s === 200 && q.b.backend === 'v10' && typeof q.b.stripeKey === 'boolean' && !JSON.stringify(q.b).match(/sk_|whsec_|key_/), q);
+q = await createOrder(mk(null, { action: 'diag' }));
+check('v10: diag sin sesión -> 401', q.s === 401, q);
+const drvOrder = store.orders.find((o) => o.driverUserId && ['picked_up', 'on_the_way', 'ready', 'preparing', 'confirmed'].includes(o.status)) || null;
+q = await ops(mk('staff1', { action: 'listOrders' }));
+check('v10: listOrders (personal) incluye ubicación del repartidor solo si hay repartidor', q.s === 200 && q.b.orders.every((o) => (o.driverUserId ? true : o.driverLatitude === null)), q.b.orders && q.b.orders.length);
+q = await ops(mk('u1', { action: 'listOrders' }));
+check('v10: cliente sigue sin listar pedidos -> 403', q.s === 403, q);
 }
 
 console.log(`\n${ok} ok, ${bad} fallas`); process.exit(bad ? 1 : 0);

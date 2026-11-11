@@ -14,6 +14,7 @@ try {
     mkdirSync(join(tmp, 'node_modules'), { recursive: true });
     cpSync(join(here, 'fake-node-appwrite'), join(tmp, 'node_modules', 'node-appwrite'), { recursive: true });
     for (const f of ['create-order', 'update-order-status', 'stripe-webhook', 'admin-api']) cpSync(join(fnRoot, f), join(tmp, f), { recursive: true });
+    cpSync(join(fnRoot, 'plan-gratuito'), join(tmp, 'plan-gratuito'), { recursive: true });
     cpSync(join(here, 'run.mjs'), join(tmp, 'run.mjs'));
     writeFileSync(join(tmp, 'package.json'), '{"type":"module"}');
     const r = spawnSync(process.execPath, ['run.mjs'], { cwd: tmp, encoding: 'utf8' });
