@@ -1,5 +1,5 @@
 // Doble en memoria de node-appwrite para pruebas de humo. NO es Appwrite real.
-export const store = { orders: [], items: [], menu: [], cust: [], rel: [], events: [], users: [], moves: [], cats: [], prefs: {}, failIncrement: false, columnMin0: true, failDecrementFor: null, decrementCalls: 0, failDecrementNth: 0, labels: {}, names: {}, failItemAt: 0, failEvents: false, pushes: [], failPush: false };
+export const store = { orders: [], items: [], menu: [], cust: [], rel: [], events: [], users: [], moves: [], cats: [], audit: [], status: {}, prefs: {}, failIncrement: false, columnMin0: true, failDecrementFor: null, decrementCalls: 0, failDecrementNth: 0, labels: {}, names: {}, failItemAt: 0, failEvents: false, pushes: [], failPush: false };
 let tick = 0;
 const stamp = () => new Date(Date.UTC(2026, 0, 1, 0, 0, ++tick)).toISOString();
 let n = 0;
@@ -14,13 +14,17 @@ export const Query = {
   orderDesc: () => ({}),
   orderAsc: () => ({}),
   greaterThanEqual: (f, v) => ({ f, op: 'gte', v: [v] }),
-  lessThanEqual: (f, v) => ({ f, op: 'lte', v: [v] })
+  lessThanEqual: (f, v) => ({ f, op: 'lte', v: [v] }),
+  isNull: (f) => ({ f, op: 'isNull', v: [] }),
+  notEqual: (f, v) => ({ f, op: 'ne', v: [].concat(v) })
 };
-const T = { orders: 'orders', items: 'items', menu: 'menu', cust: 'cust', rel: 'rel', events: 'events', users: 'users', moves: 'moves', cats: 'cats' };
+const T = { orders: 'orders', items: 'items', menu: 'menu', cust: 'cust', rel: 'rel', events: 'events', users: 'users', moves: 'moves', cats: 'cats', audit: 'audit' };
 const tbl = (id) => store[T[id]];
 const matches = (r, queries) => queries.filter((q) => q.f).every((q) => {
   const val = r[q.f];
   const id = val && typeof val === 'object' ? val.$id : val;
+  if (q.op === 'isNull') return val === null || val === undefined;
+  if (q.op === 'ne') return !q.v.includes(id);
   if (q.op === 'gte') return String(val) >= q.v[0];
   if (q.op === 'lte') return String(val) <= q.v[0];
   return q.v.includes(id);
@@ -64,14 +68,15 @@ export class TablesDB {
 export class Users {
   async get({ userId }) {
     if (!(userId in store.labels) && !(userId in store.names)) { if (!userId.startsWith('u')) throw new Error('user_not_found'); }
-    return { $id: userId, labels: store.labels[userId] ?? [], name: store.names[userId] ?? userId, prefs: store.prefs[userId] ?? {}, email: userId + '@ejemplo.test' };
+    return { $id: userId, labels: store.labels[userId] ?? [], name: store.names[userId] ?? userId, prefs: store.prefs[userId] ?? {}, email: userId + '@ejemplo.test', status: store.status[userId] !== false };
   }
   async list({ queries = [], search } = {}) {
     const q = queries.find((x) => x.f === 'labels');
     const ids = Object.keys(store.labels).filter((id) => (!q || store.labels[id].some((l) => q.v.includes(l))) && (!search || (store.names[id] ?? id).toLowerCase().includes(search.toLowerCase())));
-    return { users: ids.map((id) => ({ $id: id, name: store.names[id] ?? id, labels: store.labels[id], prefs: store.prefs[id] ?? {}, email: id + '@ejemplo.test' })) };
+    return { users: ids.map((id) => ({ $id: id, name: store.names[id] ?? id, labels: store.labels[id], prefs: store.prefs[id] ?? {}, email: id + '@ejemplo.test', status: store.status[id] !== false, $createdAt: '2026-01-01T00:00:00.000Z' })) };
   }
   async updatePrefs({ userId, prefs }) { store.prefs[userId] = prefs; return prefs; }
+  async updateStatus({ userId, status }) { store.status[userId] = status; return { $id: userId, status }; }
   async updateLabels({ userId, labels }) { store.labels[userId] = labels; return { $id: userId, labels }; }
 }
 // Appwrite Messaging: solo registra los envios (no hay FCM real).

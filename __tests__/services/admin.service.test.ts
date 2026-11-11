@@ -44,7 +44,7 @@ describe("admin.service", () => {
     it("disponibilidad, usuarios y roles llaman a sus acciones", async () => {
         mockCall.mockResolvedValue({ product: { id: "p1", available: false }, users: [{ id: "u1" }], labels: ["staff"] });
         await setProductAvailability("p1", false);
-        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setAvailability", productId: "p1", available: false });
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setProductAvailability", productId: "p1", available: false });
         expect(await listUsers("ana")).toEqual([{ id: "u1" }]);
         expect(await setUserRoles("u1", ["staff"])).toEqual(["staff"]);
         expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setRole", userId: "u1", labels: ["staff"] });
@@ -73,5 +73,25 @@ describe("admin.service", () => {
         expect(new Date(today.from!).getDate()).toBe(20);
         expect(new Date(periodRange("7d", now).from!).getDate()).toBe(14);
         expect(today.to).toBe(now.toISOString());
+    });
+});
+
+describe("v11: dashboard, categorías, clientes, auditoría", () => {
+    it("usa las acciones del servidor y tolera respuestas vacías", async () => {
+        const a = require("@/lib/services/admin.service");
+        mockCall.mockResolvedValue({ category: { id: "c1", name: "X" } });
+        expect(await a.saveCategory({ name: "X" })).toEqual({ id: "c1", name: "X" });
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "saveCategory", category: { name: "X" } });
+        await a.deleteCategory("c1");
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "deleteCategory", categoryId: "c1" });
+        mockCall.mockResolvedValue(null);
+        expect(await a.listCustomers()).toEqual([]);
+        expect(await a.listAudit()).toEqual({ enabled: false, entries: [] });
+        await a.setUserActive("u1", false);
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setUserStatus", userId: "u1", active: false });
+        await a.getCustomerOrders("u1");
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "customerOrders", customerId: "u1" });
+        await a.getCustomerOrders("u1", true);
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "customerOrders", customerId: "u1", includeAddresses: true });
     });
 });

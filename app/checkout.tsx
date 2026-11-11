@@ -150,70 +150,67 @@ const Checkout = () => {
             });
 
             // Solo aquí el pedido y sus artículos están guardados.
-           
-// Solo aquí el pedido y sus artículos están guardados.
-clearCart();
-requestIdRef.current = newClientRequestId();
+            clearCart();
+            requestIdRef.current = newClientRequestId();
 
-// PAGO EN LÍNEA: siempre intentamos obtener una sesión de Stripe.
-if (payment === "online") {
-    let message =
-        "Tu pedido quedó registrado, pero el pago sigue pendiente. Puedes intentarlo nuevamente desde Mis pedidos.";
+            // PAGO EN LÍNEA: siempre intentamos obtener una sesión de Stripe.
+            if (payment === "online") {
+                let message =
+                    "Tu pedido quedó registrado, pero el pago sigue pendiente. Puedes intentarlo nuevamente desde Mis pedidos.";
 
-    try {
-        // Si es un pedido nuevo usamos su URL.
-        // Si es un duplicado o no tiene URL, la solicitamos al servidor.
-        const checkoutUrl =
-            result.checkoutUrl ?? await requestPaymentUrl(result.orderId);
+                try {
+                    // Si es un pedido nuevo usamos su URL.
+                    // Si es un duplicado o no tiene URL, la solicitamos al servidor.
+                    const checkoutUrl =
+                        result.checkoutUrl ?? await requestPaymentUrl(result.orderId);
 
-        // Abre Stripe Checkout.
-        await openCheckout(checkoutUrl);
+                    // Abre Stripe Checkout.
+                    await openCheckout(checkoutUrl);
 
-        // El servidor consulta Stripe; nunca confiamos en el cliente.
-        const sync = await syncPayment(result.orderId);
+                    // El servidor consulta Stripe; nunca confiamos en el cliente.
+                    const sync = await syncPayment(result.orderId);
 
-        message =
-            sync.paymentStatus === "paid"
-                ? "¡Pago confirmado! Tu pedido ya está en proceso."
-                : describeProviderStatus(sync.providerStatus);
-    } catch (paymentError) {
-        console.log("Error al procesar el pago:", paymentError);
+                    message =
+                        sync.paymentStatus === "paid"
+                            ? "¡Pago confirmado! Tu pedido ya está en proceso."
+                            : describeProviderStatus(sync.providerStatus);
+                } catch (paymentError) {
+                    console.log("Error al procesar el pago:", paymentError);
 
-        message =
-            "Tu pedido quedó registrado, pero no pudimos completar o verificar el pago. No se considera pagado. Puedes intentarlo desde Mis pedidos.";
-    }
+                    message =
+                        "Tu pedido quedó registrado, pero no pudimos completar o verificar el pago. No se considera pagado. Puedes intentarlo desde Mis pedidos.";
+                }
 
-    Alert.alert("Pedido registrado", message, [
-        {
-            text: "Ver pedido",
-            onPress: () =>
-                router.replace({
-                    pathname: "/order/[id]",
-                    params: { id: result.orderId }
-                })
-        }
-    ]);
-    return;
-}
+                Alert.alert("Pedido registrado", message, [
+                    {
+                        text: "Ver pedido",
+                        onPress: () =>
+                            router.replace({
+                                pathname: "/order/[id]",
+                                params: { id: result.orderId }
+                            })
+                    }
+                ]);
+                return;
+            }
 
-// PAGO EN EFECTIVO.
-Alert.alert(
-    "Pedido confirmado",
-    result.duplicate
-        ? "Tu pedido ya estaba registrado. No se creó otro pedido."
-        : "Tu pedido se registró correctamente.",
-    [
-        {
-            text: "Ver pedido",
-            onPress: () =>
-                router.replace({
-                    pathname: "/order/[id]",
-                    params: { id: result.orderId }
-                })
-        }
-    ]
-);
-
+            // PAGO EN EFECTIVO.
+            Alert.alert(
+                "Pedido confirmado",
+                result.duplicate
+                    ? "Tu pedido ya estaba registrado. No se creó otro pedido."
+                    : "Tu pedido se registró correctamente.",
+                [
+                    {
+                        text: "Ver pedido",
+                        onPress: () =>
+                            router.replace({
+                                pathname: "/order/[id]",
+                                params: { id: result.orderId }
+                            })
+                    }
+                ]
+            );
         } catch (error) {
             console.log("Error al confirmar pedido:", error);
             // El carrito se conserva; el mismo requestId permite reintentar sin duplicar.

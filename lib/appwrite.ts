@@ -19,6 +19,13 @@ import {
     Category
 } from "@/type";
 
+/** Permisos por fila del perfil: solo su dueño (formato de cadena de Appwrite). */
+export const ownerPermissions = (accountId: string): string[] => [
+    `read("user:${accountId}")`,
+    `update("user:${accountId}")`,
+    `delete("user:${accountId}")`
+];
+
 export const appwriteConfig = {
     endpoint: process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT!,
     projectId: process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID!,
@@ -193,6 +200,8 @@ export const createUser = async ({
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
             rowId: ID.unique(),
+            // V12: el perfil solo lo lee/edita su dueño (la tabla ya no concede permisos a "any").
+            permissions: ownerPermissions(accountId),
             data: {
                 email,
                 name: accountName,
@@ -326,6 +335,7 @@ const loadCurrentUser = async () => {
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
             rowId: ID.unique(),
+            permissions: ownerPermissions(currentAccount.$id),
             data: {
                 email: currentAccount.email,
                 name: currentAccount.name,
@@ -415,7 +425,8 @@ export const getCategories = async (): Promise<Category[]> => {
             tableId: appwriteConfig.categoriesCollectionId
         });
 
-        return categories.rows.map((row) => ({
+        // Las categorias desactivadas por el admin no se muestran al cliente.
+        return categories.rows.filter((row) => (row as { active?: boolean }).active !== false).map((row) => ({
             $id: row.$id,
             $createdAt: row.$createdAt,
             $updatedAt: row.$updatedAt,

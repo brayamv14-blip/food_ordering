@@ -42,6 +42,10 @@ export interface Order {
     driverName: string | null;
     driverLocation: LatLng | null;
     driverUpdatedAt: string | null;
+    /** Cuando el cliente confirmo que recibio el pedido (solo lo escribe el servidor). */
+    receivedAt: string | null;
+    /** Importe ya reembolsado (reembolsos parciales); 0 si ninguno. */
+    refundedAmount: number;
     items: OrderItem[];
 }
 
@@ -121,6 +125,8 @@ export function mapOrderRow(row: Row, itemRows: Row[] = []): Order {
         driverName: str(row.driverName).trim() || null,
         driverLocation: parseLatLng(row.driverLatitude, row.driverLongitude),
         driverUpdatedAt: str(row.driverUpdatedAt) || null,
+        receivedAt: str(row.receivedAt) || null,
+        refundedAmount: Math.max(0, num(row.refundedAmount)),
         items: itemRows.map(mapOrderItemRow)
     };
 }

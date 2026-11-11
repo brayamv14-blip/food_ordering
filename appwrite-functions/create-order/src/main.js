@@ -21,6 +21,8 @@ const DISCOUNT = Number(process.env.DISCOUNT ?? 0.5);
 // STRIPE_SECRET_KEY vive SOLO aqui (variable de la Function), nunca en la app ni en EXPO_PUBLIC_*.
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
 const PAYMENT_RETURN_URL = process.env.PAYMENT_RETURN_URL;
+// Version del codigo desplegado: la app y `action: "diag"` la usan para detectar una Function desactualizada.
+const BACKEND_VERSION = 'v10';
 
 /**
  * Crea la sesion de Stripe Checkout con el importe calculado en el servidor.
@@ -71,6 +73,18 @@ export default async ({ req, res, log, error }) => {
         return fail(res, 400, 'bad_json', 'Cuerpo inválido.');
     }
 
+    // Diagnostico de despliegue (solo booleanos, nunca valores): sirve para comprobar que la Function es esta version y esta configurada.
+    if (body.action === 'diag') {
+        return res.json({
+            backend: BACKEND_VERSION,
+            stripeKey: !!STRIPE_KEY,
+            returnUrl: !!PAYMENT_RETURN_URL,
+            inventoryMoves: !!process.env.INVENTORY_MOVES_TABLE_ID,
+            menuTable: !!process.env.MENU_TABLE_ID,
+            coverage: !!(process.env.RESTAURANT_LATITUDE && process.env.RESTAURANT_LONGITUDE && process.env.DELIVERY_RADIUS_KM)
+        });
+    }
+
     const { clientRequestId, address, contact, items } = body;
     if (typeof clientRequestId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(clientRequestId)) {
         return fail(res, 400, 'bad_request_id', 'Falta el identificador del intento.');
@@ -104,7 +118,10 @@ export default async ({ req, res, log, error }) => {
         if (existing.rows[0]) {
             if (existing.rows[0].userId !== userId) return fail(res, 409, 'conflict', 'Identificador en uso.');
             // Un reintento nunca crea otro pedido ni otro cobro; si falta pagar, el cliente usa "Pagar ahora" (action payOrder).
-            return res.json({ orderId: existing.rows[0].$id, duplicate: true });
+            return res.json({
+                orderId: existing.rows[0].$id, duplicate: true, backend: BACKEND_VERSION,
+                paymentMethod: existing.rows[0].paymentMethod || 'cash_on_delivery', paymentStatus: existing.rows[0].paymentStatus || null
+            });
         }
 
         // Limite anti-abuso: demasiados pedidos en linea sin pagar generarian muchas sesiones de Stripe.
@@ -275,7 +292,11 @@ export default async ({ req, res, log, error }) => {
         }
 
         log(`order ${order.$id} created`);
-        return res.json({ orderId: order.$id, duplicate: false, ...(checkoutUrl ? { checkoutUrl } : {}) });
+        return res.json({
+            orderId: order.$id, duplicate: false, backend: BACKEND_VERSION,
+            paymentMethod: pay.method, paymentStatus: online ? 'pending' : 'not_required',
+            ...(checkoutUrl ? { checkoutUrl } : {})
+        });
     } catch (e) {
         error(e.message);
         return fail(res, 500, 'internal', 'No se pudo crear el pedido.');

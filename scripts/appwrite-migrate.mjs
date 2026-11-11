@@ -45,6 +45,12 @@ const EVENTS =
 const MOVES =
     process.env.APPWRITE_INVENTORY_MOVES_TABLE_ID ?? 'inventory_movements';
 
+// v11: categorias (columna `active`) y registro de auditoria administrativa. Debe coincidir con AUDIT_TABLE_ID de las Functions.
+const CATEGORIES =
+    process.env.APPWRITE_CATEGORIES_TABLE_ID ?? '6ab6f2e8000e2aaa09db';
+const AUDIT =
+    process.env.APPWRITE_AUDIT_TABLE_ID ?? 'audit_log';
+
 const apply = process.argv.includes('--apply');
 const rollback = process.argv.includes('--rollback');
 
@@ -101,6 +107,10 @@ export const PLAN = {
             flt('driverLatitude', -90, 90),
             flt('driverLongitude', -180, 180),
             dt('driverUpdatedAt'),
+            // v11: cuando el cliente confirmo que recibio el pedido (solo la Function lo escribe).
+            dt('receivedAt'),
+            // v11: importe ya reembolsado (reembolsos parciales). null/0 = ninguno.
+            flt('refundedAmount', 0, 1e7),
 
             // Estado del pago verificado únicamente por el servidor.
             str('paymentStatus', 20),
@@ -194,7 +204,9 @@ export const PLAN = {
             str('toStatus', 20),
             str('actorId', 64),
             str('actorRole', 12),
-            str('driverUserId', 64)
+            str('driverUserId', 64),
+            // v11: motivo/comentario (cancelaciones, rechazos, incidencias).
+            str('note', 200)
         ],
 
         indexes: [
@@ -202,6 +214,39 @@ export const PLAN = {
                 key: 'idx_orderId',
                 type: TablesDBIndexType.Key,
                 columns: ['orderId']
+            }
+        ]
+    },
+
+    [CATEGORIES]: {
+        label: 'categories',
+
+        // v11: permite desactivar una categoria sin borrarla (la app oculta las inactivas).
+        columns: [bool('active', true)],
+
+        indexes: []
+    },
+
+    [AUDIT]: {
+        label: 'audit_log',
+
+        // v11. Tabla nueva, SIN permisos de cliente. Solo ids y un resumen corto: nunca datos personales.
+        isNew: true,
+
+        columns: [
+            str('actorId', 64),
+            str('actorRole', 16),
+            str('action', 40),
+            str('targetType', 24),
+            str('targetId', 64),
+            str('summary', 200)
+        ],
+
+        indexes: [
+            {
+                key: 'idx_action',
+                type: TablesDBIndexType.Key,
+                columns: ['action']
             }
         ]
     },

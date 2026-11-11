@@ -156,6 +156,8 @@ const order = (overrides: any = {}) => ({
     driverName: null,
     driverLocation: null,
     driverUpdatedAt: null,
+    receivedAt: null,
+    refundedAmount: 0,
     items: [
         {
             id: "i1",

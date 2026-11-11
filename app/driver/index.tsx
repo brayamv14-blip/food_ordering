@@ -4,11 +4,12 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import OrderStatusBadge from "@/components/OrderStatusBadge";
+import ReasonModal from "@/components/ReasonModal";
 import { buildNavigationUrl, getRestaurant } from "@/lib/domain/restaurant";
 import { startDriverBroadcaster } from "@/lib/domain/driverBroadcaster";
 import { getCurrentPosition, isPermissionFailure } from "@/lib/services/location";
 import { getMyRoles } from "@/lib/services/roles";
-import { StaffOrder, changeOrderStatus, describeBackendError, listMyDeliveries, respondAssignment, sendDriverLocation, setDriverAvailability } from "@/lib/services/staff.service";
+import { PoolOrder, StaffOrder, changeOrderStatus, claimOrder, describeBackendError, listAvailableOrders, listMyDeliveries, respondAssignment, sendDriverLocation, setDriverAvailability } from "@/lib/services/staff.service";
 
 /**
  * Interfaz minima de repartidor (cuenta con etiqueta `driver`).
@@ -28,7 +29,11 @@ const DriverDeliveries = () => {
     const [sharingId, setSharingId] = useState<string | null>(null);
     const [lastSent, setLastSent] = useState<string | null>(null);
     const [sharingError, setSharingError] = useState<string | null>(null);
-    const [tab, setTab] = useState<"active" | "history">("active");
+    const [tab, setTab] = useState<"pool" | "active" | "history">("active");
+    const [pool, setPool] = useState<PoolOrder[]>([]);
+    const [poolOffline, setPoolOffline] = useState(false);
+    // Motivo obligatorio para rechazar una asignacion o registrar una entrega fallida.
+    const [reasonFor, setReasonFor] = useState<null | { order: StaffOrder; kind: "reject" | "failed" }>(null);
     // Disponibilidad: por omision disponible; el servidor es quien la guarda.
     const [available, setAvailable] = useState(true);
     const stopRef = useRef<null | (() => void)>(null);
@@ -43,7 +48,13 @@ const DriverDeliveries = () => {
     const load = useCallback(async () => {
         try {
             setError(null);
-            setOrders(await listMyDeliveries(tab === "history"));
+            if (tab === "pool") {
+                const r = await listAvailableOrders();
+                setPool(r.orders);
+                setPoolOffline(r.offline);
+            } else {
+                setOrders(await listMyDeliveries(tab === "history"));
+            }
         } catch (e) {
             setError(describeBackendError(e));
         } finally {
@@ -135,11 +146,26 @@ const DriverDeliveries = () => {
         }
     };
 
-    const answerAssignment = async (o: StaffOrder, accept: boolean) => {
+    // Tomar un pedido del pool: el servidor decide quien llega primero (409 si ya lo tomaron).
+    const takeOrder = async (o: PoolOrder) => {
         if (busyId) return;
         setBusyId(o.id);
         try {
-            await respondAssignment(o.id, accept);
+            await claimOrder(o.id);
+            setTab("active");
+        } catch (e) {
+            Alert.alert("No se pudo tomar el pedido", describeBackendError(e));
+            await load();
+        } finally {
+            setBusyId(null);
+        }
+    };
+
+    const answerAssignment = async (o: StaffOrder, accept: boolean, reason?: string) => {
+        if (busyId) return;
+        setBusyId(o.id);
+        try {
+            await respondAssignment(o.id, accept, reason);
             await load();
         } catch (e) {
             Alert.alert("No se pudo completar", describeBackendError(e));
@@ -148,12 +174,12 @@ const DriverDeliveries = () => {
         }
     };
 
-    const setStatus = async (o: StaffOrder, to: "picked_up" | "on_the_way" | "delivered" | "delivery_failed") => {
+    const setStatus = async (o: StaffOrder, to: "picked_up" | "on_the_way" | "delivered" | "delivery_failed", reason?: string) => {
         if (busyId) return;
         setBusyId(o.id);
         try {
             if (to !== "on_the_way") stopSharing();
-            await changeOrderStatus(o.id, to);
+            await changeOrderStatus(o.id, to, {}, reason);
             await load();
         } catch (e) {
             Alert.alert("No se pudo completar", describeBackendError(e));
@@ -191,11 +217,11 @@ const DriverDeliveries = () => {
                 accessibilityLabel="Disponible para recibir pedidos"
             >
                 <Ionicons name={available ? "radio-button-on" : "radio-button-off"} size={18} color={available ? "#22C55E" : "#9CA3AF"} />
-                <Text className="ml-2 flex-1 text-sm text-dark-100">{available ? "Disponible para recibir entregas" : "No disponible: el personal no te asignará pedidos"}</Text>
+                <Text className="ml-2 flex-1 text-sm text-dark-100">{available ? "Conectado y disponible (los pedidos en curso te marcan como ocupado)" : "Desconectado: no recibirás pedidos ni verás el pool"}</Text>
             </TouchableOpacity>
 
             <View className="mx-5 mb-3 flex-row">
-                {(["active", "history"] as const).map((k) => (
+                {(["pool", "active", "history"] as const).map((k) => (
                     <TouchableOpacity
                         key={k}
                         onPress={() => { setLoading(true); setTab(k); }}
@@ -203,7 +229,7 @@ const DriverDeliveries = () => {
                         accessibilityRole="button"
                         accessibilityState={{ selected: tab === k }}
                     >
-                        <Text className={tab === k ? "font-bold text-white" : "text-dark-100"}>{k === "active" ? "Activas" : "Historial"}</Text>
+                        <Text className={tab === k ? "font-bold text-white" : "text-dark-100"}>{k === "pool" ? "Disponibles" : k === "active" ? "Activas" : "Historial"}</Text>
                     </TouchableOpacity>
                 ))}
             </View>
@@ -220,6 +246,29 @@ const DriverDeliveries = () => {
                 <View className="mx-5 mb-3 rounded-xl bg-red-50 p-3"><Text className="text-sm text-red-500">{error ?? sharingError}</Text></View>
             )}
 
+            {tab === "pool" ? (
+                <FlatList
+                    data={pool}
+                    keyExtractor={(o) => o.id}
+                    contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }}
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
+                    ListEmptyComponent={!error ? <Text className="mt-10 text-center text-gray-400">{poolOffline ? "Estás desconectado: actívate para ver pedidos disponibles." : "No hay pedidos disponibles ahora. Desliza para actualizar."}</Text> : null}
+                    renderItem={({ item: o }) => (
+                        <View className="mb-4 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+                            <View className="flex-row items-center justify-between">
+                                <Text className="text-base font-bold text-dark-100">#{o.id.slice(-6)}</Text>
+                                <OrderStatusBadge status={o.status} />
+                            </View>
+                            <Text className="mt-2 text-sm text-gray-400">{o.itemsCount} producto(s) · {o.paymentMethod === "cash_on_delivery" ? "Efectivo" : "Pagado en línea"}</Text>
+                            <Text className="mt-1 text-sm text-dark-100">Total ${o.total}{typeof o.distanceKm === "number" ? ` · ~${o.distanceKm} km` : ""}</Text>
+                            <Text className="mt-1 text-xs text-gray-400">Los datos del cliente se muestran al aceptar.</Text>
+                            <TouchableOpacity onPress={() => takeOrder(o)} disabled={busyId === o.id} className="mt-3 items-center rounded-xl bg-primary py-3" accessibilityRole="button">
+                                {busyId === o.id ? <ActivityIndicator color="#FFFFFF" /> : <Text className="font-bold text-white">Aceptar pedido</Text>}
+                            </TouchableOpacity>
+                        </View>
+                    )}
+                />
+            ) : (
             <FlatList
                 data={orders}
                 keyExtractor={(o) => o.id}
@@ -264,7 +313,7 @@ const DriverDeliveries = () => {
                                     <TouchableOpacity onPress={() => answerAssignment(o, true)} disabled={busy} className="mr-2 flex-1 items-center rounded-xl bg-primary py-3" accessibilityRole="button">
                                         {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text className="font-bold text-white">Aceptar</Text>}
                                     </TouchableOpacity>
-                                    <TouchableOpacity onPress={() => answerAssignment(o, false)} disabled={busy} className="flex-1 items-center rounded-xl border border-red-300 py-3" accessibilityRole="button">
+                                    <TouchableOpacity onPress={() => setReasonFor({ order: o, kind: "reject" })} disabled={busy} className="flex-1 items-center rounded-xl border border-red-300 py-3" accessibilityRole="button">
                                         <Text className="font-bold text-red-500">Rechazar</Text>
                                     </TouchableOpacity>
                                 </View>
@@ -276,10 +325,7 @@ const DriverDeliveries = () => {
                             )}
                             {tab === "active" && o.driverResponse !== "pending" && o.status === "picked_up" && (
                                 <TouchableOpacity
-                                    onPress={() => Alert.alert("Entrega fallida", "¿No pudiste entregar el pedido? El restaurante será avisado.", [
-                                        { text: "Cancelar", style: "cancel" },
-                                        { text: "Sí, registrar", style: "destructive", onPress: () => setStatus(o, "delivery_failed") }
-                                    ])}
+                                    onPress={() => setReasonFor({ order: o, kind: "failed" })}
                                     disabled={busy}
                                     className="mt-2 items-center rounded-xl border border-red-300 py-3"
                                     accessibilityRole="button"
@@ -305,10 +351,7 @@ const DriverDeliveries = () => {
                                         {busy ? <ActivityIndicator color="#22C55E" /> : <Text className="font-bold text-green-600">Marcar entregado</Text>}
                                     </TouchableOpacity>
                                     <TouchableOpacity
-                                        onPress={() => Alert.alert("Entrega fallida", "¿No pudiste entregar el pedido? El restaurante será avisado.", [
-                                            { text: "Cancelar", style: "cancel" },
-                                            { text: "Sí, registrar", style: "destructive", onPress: () => setStatus(o, "delivery_failed") }
-                                        ])}
+                                        onPress={() => setReasonFor({ order: o, kind: "failed" })}
                                         disabled={busy}
                                         className="mt-2 items-center rounded-xl border border-red-300 py-3"
                                         accessibilityRole="button"
@@ -319,6 +362,24 @@ const DriverDeliveries = () => {
                             )}
                         </View>
                     );
+                }}
+            />
+            )}
+
+            <ReasonModal
+                visible={!!reasonFor}
+                title={reasonFor?.kind === "reject" ? "¿Por qué rechazas el pedido?" : "¿Por qué no se pudo entregar?"}
+                options={reasonFor?.kind === "reject" ? ["Estoy lejos", "Problema con mi vehículo", "Ya no puedo trabajar"] : ["Cliente no respondió", "Dirección incorrecta", "Cliente rechazó el pedido", "Problema con el vehículo"]}
+                confirmLabel={reasonFor?.kind === "reject" ? "Rechazar" : "Registrar"}
+                destructive
+                busy={!!busyId}
+                onClose={() => setReasonFor(null)}
+                onConfirm={async (reason) => {
+                    const t = reasonFor;
+                    setReasonFor(null);
+                    if (!t) return;
+                    if (t.kind === "reject") await answerAssignment(t.order, false, reason);
+                    else await setStatus(t.order, "delivery_failed", reason);
                 }}
             />
         </View>

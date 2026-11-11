@@ -7,5 +7,5 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/node_modules"
 cp -r "$HERE/fake-node-appwrite" "$TMP/node_modules/node-appwrite"
 for f in create-order update-order-status stripe-webhook admin-api; do cp -r "$FN/$f" "$TMP/"; done
-cp "$HERE/run.mjs" "$TMP/run.mjs"; echo '{"type":"module"}' > "$TMP/package.json"
+cp -r "$FN/plan-gratuito" "$TMP/"; cp "$HERE/run.mjs" "$TMP/run.mjs"; echo '{"type":"module"}' > "$TMP/package.json"
 (cd "$TMP" && node run.mjs)

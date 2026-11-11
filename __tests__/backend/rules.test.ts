@@ -276,7 +276,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
             expect(rules.stripeEventToPayment(ev("checkout.session.async_payment_failed", { client_reference_id: "o1" }))).toMatchObject({ kind: "failed" });
             expect(rules.stripeEventToPayment(ev("checkout.session.expired", { client_reference_id: "o1" }))).toMatchObject({ kind: "expired" });
             expect(rules.stripeEventToPayment(ev("charge.refunded", { refunded: true, metadata: { orderId: "o1" } }))).toMatchObject({ kind: "refunded", orderId: "o1" });
-            expect(rules.stripeEventToPayment(ev("charge.refunded", { amount: 100, amount_refunded: 50, metadata: { orderId: "o1" } }))).toBeNull(); // parcial
+            expect(rules.stripeEventToPayment(ev("charge.refunded", { amount: 100, amount_refunded: 50, metadata: { orderId: "o1" } }))).toMatchObject({ kind: "partial_refund", orderId: "o1" }); // parcial: no cambia el estado del pago
             expect(rules.stripeEventToPayment(ev("customer.created", {}))).toBeNull();
             expect(rules.stripeEventToPayment(null)).toBeNull();
         });
