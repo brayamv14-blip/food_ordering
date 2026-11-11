@@ -24,7 +24,7 @@ import { isPushRegistered, registerForPush, unregisterPush } from "@/lib/service
 const Profile = () => {
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
-    const [roles, setRoles] = useState<Roles>({ staff: false, driver: false });
+    const [roles, setRoles] = useState<Roles>({ staff: false, driver: false, admin: false });
     const [pushBusy, setPushBusy] = useState(false);
 
     const loadProfile = async () => {
@@ -403,6 +403,51 @@ const Profile = () => {
                                 <Ionicons name="clipboard-outline" size={22} color="#3B82F6" />
                             </View>
                             <Text className="ml-3 text-base font-bold text-dark-100">Administrar pedidos</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+                {roles.staff && (
+                    <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => router.push("/admin/products" as never)}
+                        className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm"
+                    >
+                        <View className="flex-row items-center">
+                            <View className="h-11 w-11 items-center justify-center rounded-full bg-amber-50">
+                                <Ionicons name="cube-outline" size={22} color="#F59E0B" />
+                            </View>
+                            <Text className="ml-3 text-base font-bold text-dark-100">Productos e inventario</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+                {roles.staff && (
+                    <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => router.push("/admin/reports" as never)}
+                        className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm"
+                    >
+                        <View className="flex-row items-center">
+                            <View className="h-11 w-11 items-center justify-center rounded-full bg-green-50">
+                                <Ionicons name="stats-chart-outline" size={22} color="#22C55E" />
+                            </View>
+                            <Text className="ml-3 text-base font-bold text-dark-100">Reportes y pagos</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+                {roles.admin && (
+                    <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => router.push("/admin/users" as never)}
+                        className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm"
+                    >
+                        <View className="flex-row items-center">
+                            <View className="h-11 w-11 items-center justify-center rounded-full bg-red-50">
+                                <Ionicons name="people-outline" size={22} color="#EF4444" />
+                            </View>
+                            <Text className="ml-3 text-base font-bold text-dark-100">Usuarios y roles</Text>
                         </View>
                         <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
                     </TouchableOpacity>

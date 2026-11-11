@@ -11,7 +11,10 @@ export const ORDER_STATUSES = [
     "pending",
     "confirmed",
     "preparing",
+    "ready",
+    "picked_up",
     "on_the_way",
+    "delivery_failed",
     "delivered",
     "cancelled"
 ] as const;
@@ -50,6 +53,27 @@ export const STATUS_META: Record<OrderStatus, StatusMeta> = {
         background: "#F59E0B22",
         description: "Estamos preparando tus alimentos."
     },
+    ready: {
+        label: "Listo para recoger",
+        icon: "bag-check-outline",
+        color: "#0EA5E9",
+        background: "#0EA5E922",
+        description: "Tu pedido está listo y espera al repartidor."
+    },
+    picked_up: {
+        label: "Recogido",
+        icon: "bag-handle-outline",
+        color: "#06B6D4",
+        background: "#06B6D422",
+        description: "El repartidor ya tiene tu pedido y está por salir."
+    },
+    delivery_failed: {
+        label: "Entrega fallida",
+        icon: "alert-circle-outline",
+        color: "#DC2626",
+        background: "#DC262622",
+        description: "No pudimos entregar tu pedido. El restaurante se pondrá en contacto contigo."
+    },
     on_the_way: {
         label: "En camino",
         icon: "bicycle-outline",
@@ -85,8 +109,11 @@ export const UNKNOWN_STATUS_META: StatusMeta = {
 export const ALLOWED_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
     pending: ["confirmed", "cancelled"],
     confirmed: ["preparing", "cancelled"],
-    preparing: ["on_the_way"],
-    on_the_way: ["delivered"],
+    preparing: ["ready", "picked_up", "on_the_way"],
+    ready: ["picked_up", "on_the_way"],
+    picked_up: ["on_the_way", "delivery_failed"],
+    on_the_way: ["delivered", "delivery_failed"],
+    delivery_failed: ["on_the_way", "cancelled"],
     delivered: [],
     cancelled: []
 };
@@ -96,6 +123,7 @@ export const PROGRESS_STEPS: readonly OrderStatus[] = [
     "pending",
     "confirmed",
     "preparing",
+    "ready",
     "on_the_way",
     "delivered"
 ];
@@ -146,6 +174,8 @@ export function canCustomerCancel(value: unknown): boolean {
  */
 export function getProgressIndex(value: unknown): number {
     const status = parseOrderStatus(value);
+    // "Recogido" no es un paso propio de la linea: se muestra junto a "Listo" (el estado exacto sale de STATUS_META).
+    if (status === "picked_up") return PROGRESS_STEPS.indexOf("ready");
     return status ? PROGRESS_STEPS.indexOf(status) : -1;
 }
 
@@ -166,7 +196,10 @@ const ACTION_LABELS: Record<OrderStatus, string> = {
     pending: "Volver a pendiente",
     confirmed: "Confirmar pedido",
     preparing: "Empezar a preparar",
+    ready: "Marcar listo para recoger",
+    picked_up: "Marcar recogido",
     on_the_way: "Enviar a reparto",
+    delivery_failed: "Registrar entrega fallida",
     delivered: "Marcar entregado",
     cancelled: "Cancelar pedido"
 };

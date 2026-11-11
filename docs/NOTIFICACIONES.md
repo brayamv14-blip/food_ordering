@@ -26,3 +26,14 @@ La app obtiene el **token FCM nativo** (`Notifications.getDevicePushTokenAsync()
 Si no llega: revisa que el proveedor esté **habilitado**, la clave de servicio, que `google-services.json` sea del mismo proyecto de Firebase, y los logs de la ejecución de la Function.
 
 > Las pruebas automatizadas (Jest y el smoke test) usan dobles: **no** demuestran que FCM entregue en un teléfono. Esa validación real está pendiente hasta que la hagas con tu build.
+
+## v8: eventos y destinatarios
+| Evento | Destinatario | Origen |
+|---|---|---|
+| Pedido recibido (efectivo) / pago confirmado (en línea) | dueño del pedido | create-order / webhook |
+| Confirmado, preparando, listo, **recogido**, en camino, entrega fallida, entregado, cancelado | dueño (no se le avisa de sus propios cambios) | update-order-status |
+| Nueva entrega asignada | solo el repartidor asignado | assignDriver / autoasignación |
+| Repartidor rechazó el pedido | personal y administradores (si no hubo reasignación) | respondAssignment |
+| Existencias bajas | personal y administradores | create-order |
+| Pago fallido / reembolsado / pedido cancelado por sesión vencida | dueño | webhook |
+Los destinatarios los decide siempre el servidor. Un fallo de Messaging nunca bloquea la operación (queda en el log de la Function). Tokens inválidos: los gestiona Appwrite Messaging (el destino se marca inválido); la app vuelve a registrar el destino al abrir sesión. **No hay deduplicación de push más allá de la idempotencia de cada operación** (un evento repetido no se re-notifica porque no cambia el estado).

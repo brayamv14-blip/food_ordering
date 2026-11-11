@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
@@ -8,7 +8,7 @@ import LeafletMap from "@/components/LeafletMap";
 import useAuthStore from "@/store/auth.store";
 import { useOrderTracking } from "@/hooks/useOrderTracking";
 import { useRoute } from "@/hooks/useRoute";
-import { describeAge } from "@/lib/domain/coordinates";
+import { FRESHNESS_LABEL, describeAge, locationFreshness } from "@/lib/domain/coordinates";
 import { getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
 import { MapData, MapMarker } from "@/lib/domain/geo";
 import { getRestaurant } from "@/lib/domain/restaurant";
@@ -23,6 +23,13 @@ const TrackingScreen = () => {
     const destination = order?.deliveryLocation ?? null;
     const route = useRoute(driver, destination);
     const lastUpdate = useMemo(() => describeAge(order?.driverUpdatedAt), [order?.driverUpdatedAt]);
+    // Se recalcula cada 30 s para que "actualizada" pase a "antigua" aunque no lleguen datos nuevos.
+    const [now, setNow] = useState(() => new Date());
+    useEffect(() => {
+        const t = setInterval(() => setNow(new Date()), 30_000);
+        return () => clearInterval(t);
+    }, []);
+    const freshness = locationFreshness(order?.driverUpdatedAt, !!driver, now);
 
     // Solo puntos reales: el destino del pedido y la última ubicación que el repartidor sí compartió.
     const mapData = useMemo<MapData>(() => {
@@ -98,6 +105,14 @@ const TrackingScreen = () => {
                 <Text className="small-regular text-gray-200 mt-1">
                     Última ubicación: {lastUpdate ?? "sin datos todavía"}
                 </Text>
+                {isTrackable(order.status) && (
+                    <Text
+                        className={`small-regular mt-1 ${freshness === "live" ? "text-green-600" : freshness === "stale" ? "text-amber-600" : "text-gray-200"}`}
+                        accessibilityLiveRegion="polite"
+                    >
+                        {FRESHNESS_LABEL[freshness]}
+                    </Text>
+                )}
                 {route?.ok && route.durationSeconds !== null && (
                     <Text className="small-regular text-gray-200 mt-1">
                         Ruta por calles: ~{Math.max(1, Math.round(route.durationSeconds / 60))} min

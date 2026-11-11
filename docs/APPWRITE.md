@@ -26,3 +26,17 @@ Appwrite Cloud Free permite **5 funciones por proyecto** (fuente: https://appwri
 
 ## Repartidor
 `myDeliveries` devuelve las entregas activas del repartidor autenticado; con `history: true`, sus entregas terminadas (entregado/cancelado). Las vistas de pedido para personal/repartidor incluyen `deliveryLatitude/deliveryLongitude` solo si el cliente confirmó coordenadas.
+
+## v7: estados nuevos, tope anti-abuso y auditoría de solo lectura
+- Estados `ready` y `delivery_failed`: `orders.status` es texto (varchar 255), **no hay migración de columna**. Transiciones: `preparing → ready | on_the_way`, `ready → on_the_way`, `on_the_way → delivered | delivery_failed`, `delivery_failed → on_the_way | cancelled` (solo personal; cancelar reembolsa si estaba pagado).
+- Índice nuevo `idx_status` en `orders`: `node scripts/appwrite-migrate.mjs` (vista previa) y luego `--apply`.
+- `create-order` rechaza con 429 (`too_many_open_orders`) al usuario con 5 pedidos en línea sin pagar.
+- `node scripts/verify-appwrite.mjs` (solo lectura) informa qué funciones están desplegadas, sus variables (solo nombres), columnas, índices y permisos reales.
+
+## v8: inventario, ciclo del repartidor y administración
+- **Migración** (`node scripts/appwrite-migrate.mjs` = vista previa; `--apply` aplica; no borra datos): `orders.driverResponse` (varchar 12), `menu.stock` (int, null = sin control), `menu.lowStockThreshold` (int) y **tabla nueva `inventory_movements`** (sin permisos de cliente; índices `idx_orderId_type`, `idx_menuId`). Cambia el id con `APPWRITE_INVENTORY_MOVES_TABLE_ID` si prefieres otro. Verificación posterior: `node scripts/verify-appwrite.mjs` (solo lectura). `--rollback --apply` elimina lo agregado (pierdes sus datos).
+- **Variables nuevas** en `create-order`, `update-order-status` y `stripe-webhook`: `INVENTORY_MOVES_TABLE_ID` y `MENU_TABLE_ID` (esta última también en `update-order-status` y `stripe-webhook`). Opcionales en `update-order-status`: `AUTO_ASSIGN_DRIVER=true` (asigna automáticamente al pasar a *preparando*; por omisión apagado) y `MAX_ACTIVE_PER_DRIVER` (3).
+- **Cuarta función `admin-api`**: ver `docs/ADMIN.md` (usas 4 de 5).
+- **Disponibilidad del repartidor:** se guarda en las *prefs* de su cuenta de Auth (`driverAvailable`), sin columna nueva. Sin valor = disponible.
+- **Estados:** `picked_up` (recogido) entre listo y en camino; `orders.status` es varchar: sin migración de columna.
+- **Importante antes de desplegar:** comprueba que el SDK `node-appwrite ~22.1.1` de las Functions expone `tablesDB.decrementRowColumn/incrementRowColumn` (el verificador lo comprueba en local) y que el permiso de tabla `menu` permite lectura a usuarios (las filas nuevas las crea la Function sin permisos por fila).

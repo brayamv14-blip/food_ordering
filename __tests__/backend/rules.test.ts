@@ -14,6 +14,33 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(rules.canActorTransition({ actor: "customer", isOwner: false, from: "pending", to: "cancelled" }).ok).toBe(false);
     });
 
+    it("listo para recoger y entrega fallida: quién puede hacer cada cambio", () => {
+        const d = (from: string, to: string) => rules.canActorTransition({ actor: "driver", isOwner: false, from, to }).ok;
+        expect(d("ready", "on_the_way")).toBe(true);
+        expect(d("on_the_way", "delivery_failed")).toBe(true);
+        expect(d("preparing", "ready")).toBe(false); // el repartidor no marca "listo": es del restaurante
+        expect(d("delivery_failed", "cancelled")).toBe(false);
+        expect(d("delivery_failed", "on_the_way")).toBe(true); // El repartidor asignado puede reintentar.
+        const s = (from: string, to: string, extra: any = {}) => rules.canActorTransition({ actor: "staff", isOwner: false, from, to, ...extra });
+        expect(s("preparing", "ready").ok).toBe(true);
+        expect(s("ready", "on_the_way", { hasDriver: false })).toMatchObject({ ok: false, code: "driver_required" });
+        expect(s("delivery_failed", "cancelled").ok).toBe(true);
+        expect(s("delivery_failed", "delivered").ok).toBe(false);
+        expect(rules.canActorTransition({ actor: "customer", isOwner: true, from: "ready", to: "cancelled" }).ok).toBe(false);
+        expect(rules.canAssignDriver("ready")).toBe(true);
+        expect(rules.canAssignDriver("delivery_failed")).toBe(true);
+        expect(rules.ACTIVE_DELIVERY).toEqual(expect.arrayContaining(["ready", "delivery_failed"]));
+        expect(rules.buildStatusNotification("ready", "ord123456")).not.toBeNull();
+        expect(rules.buildStatusNotification("delivery_failed", "ord123456")).not.toBeNull();
+    });
+
+    it("tope de pedidos en línea sin pagar por usuario", () => {
+        const open = { paymentMethod: "online", status: "pending", paymentStatus: "pending" };
+        expect(rules.countOpenUnpaid([open, open, { ...open, paymentStatus: "paid" }, { ...open, status: "cancelled" }, { paymentMethod: "cash_on_delivery", status: "pending" }, null])).toBe(2);
+        expect(rules.countOpenUnpaid(undefined)).toBe(0);
+        expect(rules.MAX_OPEN_UNPAID).toBe(5);
+    });
+
     it("el repartidor solo avanza a en camino / entregado", () => {
         expect(rules.canActorTransition({ actor: "driver", isOwner: false, from: "preparing", to: "on_the_way" }).ok).toBe(true);
         expect(rules.canActorTransition({ actor: "driver", isOwner: false, from: "on_the_way", to: "delivered" }).ok).toBe(true);
@@ -73,10 +100,10 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(rules.toStaffOrderView({ $id: "o1", deliveryLatitude: 19.4, deliveryLongitude: "x" })).toMatchObject({ deliveryLatitude: 19.4, deliveryLongitude: null });
     });
 
-    it("solo existen las tres funciones permitidas (pedidos, estados y webhook de Stripe)", () => {
+    it("solo existen las funciones previstas (pedidos, estados, webhook de Stripe y administración)", () => {
         const root = path.join(__dirname, "../../appwrite-functions");
         const dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, "src/main.js"))).map((d) => d.name).sort();
-        expect(dirs).toEqual(["create-order", "stripe-webhook", "update-order-status"]);
+        expect(dirs).toEqual(["admin-api", "create-order", "stripe-webhook", "update-order-status"]);
     });
 
     it("las copias de rules.js dentro de cada función están sincronizadas", () => {
@@ -85,7 +112,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
         const lf = (txt: string) => txt.replace(/\r\n/g, "\n");
         const shared = lf(fs.readFileSync(path.join(root, "shared/rules.js"), "utf8"));
         const expected = shared.replace(/module\.exports = \{([\s\S]*?)\};\s*$/, "export {$1};\n");
-        for (const fn of ["create-order", "update-order-status", "stripe-webhook"]) {
+        for (const fn of ["create-order", "update-order-status", "stripe-webhook", "admin-api"]) {
             const copy = lf(fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8"));
             expect(copy.endsWith(expected)).toBe(true);
         }
@@ -225,6 +252,9 @@ describe("reglas del backend (Appwrite Functions)", () => {
             expect(rules.movePaymentStatus("paid", "refunded")).toMatchObject({ ok: true, changed: true });
             expect(rules.movePaymentStatus("refunded", "refunded")).toMatchObject({ ok: true, changed: false });
             expect(rules.movePaymentStatus("refunded", "paid").ok).toBe(false);
+            // v9: un reembolso que llega antes que el "pagado" deja el pago reembolsado y el pagado tardío no lo revierte
+            expect(rules.movePaymentStatus("pending", "refunded")).toMatchObject({ ok: true, changed: true });
+            expect(rules.movePaymentStatus("failed", "refunded")).toMatchObject({ ok: true, changed: true });
             expect(rules.movePaymentStatus("paid", "pending").ok).toBe(false);
             expect(rules.movePaymentStatus("not_required", "paid").ok).toBe(false);
         });

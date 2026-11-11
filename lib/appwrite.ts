@@ -54,7 +54,9 @@ export const appwriteConfig = {
 
     functions: {
         createOrder: process.env.EXPO_PUBLIC_FN_CREATE_ORDER ?? "",
-        updateOrderStatus: process.env.EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS ?? ""
+        updateOrderStatus: process.env.EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS ?? "",
+        // Administracion (productos, inventario, usuarios/roles, pagos, reportes). Opcional.
+        adminApi: process.env.EXPO_PUBLIC_FN_ADMIN_API ?? ""
     }
 };
 

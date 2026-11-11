@@ -35,8 +35,12 @@ import { findUnavailableItems } from "@/lib/services/catalog.service";
 import AddressPicker from "@/components/AddressPicker";
 import { friendlyServerError } from "@/lib/domain/restaurant";
 import { PAYMENT_LABELS, PaymentMethod, describeProviderStatus } from "@/lib/domain/payment";
-import { isOnlinePaymentEnabled, openCheckout, syncPayment } from "@/lib/services/payments.service";
-
+import {
+    isOnlinePaymentEnabled,
+    openCheckout,
+    requestPaymentUrl,
+    syncPayment
+} from "@/lib/services/payments.service";
 type AddressChoice = "home" | "work" | "manual";
 
 const LABELS: Record<AddressChoice, string> = {
@@ -146,33 +150,70 @@ const Checkout = () => {
             });
 
             // Solo aquí el pedido y sus artículos están guardados.
-            clearCart();
-            requestIdRef.current = newClientRequestId();
+           
+// Solo aquí el pedido y sus artículos están guardados.
+clearCart();
+requestIdRef.current = newClientRequestId();
 
-            if (result.checkoutUrl) {
-                // Pago en linea: el pedido ya existe (pendiente de pago). Se abre Stripe Checkout y,
-                // al volver, el SERVIDOR verifica el pago; la app nunca da un pedido por pagado.
-                let message = "Tu pedido quedó registrado. Puedes pagarlo o verificar el pago en Mis pedidos.";
-                try {
-                    await openCheckout(result.checkoutUrl);
-                    const sync = await syncPayment(result.orderId);
-                    message = sync.paymentStatus === "paid" ? "¡Pago confirmado! Tu pedido ya está en proceso." : describeProviderStatus(sync.providerStatus);
-                } catch {
-                    /* se conserva el mensaje por omision */
-                }
-                Alert.alert("Pedido registrado", message, [
-                    { text: "Ver pedido", onPress: () => router.replace({ pathname: "/order/[id]", params: { id: result.orderId } }) }
-                ]);
-                return;
-            }
+// PAGO EN LÍNEA: siempre intentamos obtener una sesión de Stripe.
+if (payment === "online") {
+    let message =
+        "Tu pedido quedó registrado, pero el pago sigue pendiente. Puedes intentarlo nuevamente desde Mis pedidos.";
 
-            Alert.alert(
-                "Pedido confirmado",
-                result.duplicate
-                    ? "Tu pedido ya estaba registrado. No se cobró dos veces."
-                    : "Tu pedido se registró correctamente.",
-                [{ text: "Ver pedido", onPress: () => router.replace({ pathname: "/order/[id]", params: { id: result.orderId } }) }]
-            );
+    try {
+        // Si es un pedido nuevo usamos su URL.
+        // Si es un duplicado o no tiene URL, la solicitamos al servidor.
+        const checkoutUrl =
+            result.checkoutUrl ?? await requestPaymentUrl(result.orderId);
+
+        // Abre Stripe Checkout.
+        await openCheckout(checkoutUrl);
+
+        // El servidor consulta Stripe; nunca confiamos en el cliente.
+        const sync = await syncPayment(result.orderId);
+
+        message =
+            sync.paymentStatus === "paid"
+                ? "¡Pago confirmado! Tu pedido ya está en proceso."
+                : describeProviderStatus(sync.providerStatus);
+    } catch (paymentError) {
+        console.log("Error al procesar el pago:", paymentError);
+
+        message =
+            "Tu pedido quedó registrado, pero no pudimos completar o verificar el pago. No se considera pagado. Puedes intentarlo desde Mis pedidos.";
+    }
+
+    Alert.alert("Pedido registrado", message, [
+        {
+            text: "Ver pedido",
+            onPress: () =>
+                router.replace({
+                    pathname: "/order/[id]",
+                    params: { id: result.orderId }
+                })
+        }
+    ]);
+    return;
+}
+
+// PAGO EN EFECTIVO.
+Alert.alert(
+    "Pedido confirmado",
+    result.duplicate
+        ? "Tu pedido ya estaba registrado. No se creó otro pedido."
+        : "Tu pedido se registró correctamente.",
+    [
+        {
+            text: "Ver pedido",
+            onPress: () =>
+                router.replace({
+                    pathname: "/order/[id]",
+                    params: { id: result.orderId }
+                })
+        }
+    ]
+);
+
         } catch (error) {
             console.log("Error al confirmar pedido:", error);
             // El carrito se conserva; el mismo requestId permite reintentar sin duplicar.

@@ -17,16 +17,17 @@ beforeEach(() => { jest.clearAllMocks(); mockConfig.functions.updateOrderStatus 
 
 describe("roles", () => {
     it("interpreta las etiquetas de la cuenta", () => {
-        expect(rolesFromLabels(["staff"])).toEqual({ staff: true, driver: false });
-        expect(rolesFromLabels(["driver", "x"])).toEqual({ staff: false, driver: true });
-        expect(rolesFromLabels(undefined)).toEqual({ staff: false, driver: false });
-        expect(rolesFromLabels("staff")).toEqual({ staff: false, driver: false });
+        expect(rolesFromLabels(["staff"])).toEqual({ staff: true, driver: false, admin: false });
+        expect(rolesFromLabels(["admin"])).toEqual({ staff: true, driver: false, admin: true });
+        expect(rolesFromLabels(["driver", "x"])).toEqual({ staff: false, driver: true, admin: false });
+        expect(rolesFromLabels(undefined)).toEqual({ staff: false, driver: false, admin: false });
+        expect(rolesFromLabels("staff")).toEqual({ staff: false, driver: false, admin: false });
     });
     it("sin sesión o con error de red no concede ningún rol", async () => {
         mockAccount.get.mockResolvedValue({ labels: ["staff"] });
-        expect(await getMyRoles()).toEqual({ staff: true, driver: false });
+        expect(await getMyRoles()).toEqual({ staff: true, driver: false, admin: false });
         mockAccount.get.mockRejectedValue(new Error("401"));
-        expect(await getMyRoles()).toEqual({ staff: false, driver: false });
+        expect(await getMyRoles()).toEqual({ staff: false, driver: false, admin: false });
     });
 });
 

@@ -20,12 +20,18 @@ export interface StaffOrder {
     deliveryLongitude?: number | null;
     driverUserId: string | null;
     driverName: string | null;
+    /** pending = asignado sin responder | accepted | null si no hay repartidor. */
+    driverResponse?: "pending" | "accepted" | null;
     items: { name: string; quantity: number }[];
 }
 
 export interface DriverOption {
     id: string;
     name: string;
+    /** false si el repartidor se marco no disponible. */
+    available?: boolean;
+    /** Entregas activas que ya tiene. */
+    activeOrders?: number;
 }
 
 export interface OrderEvent {
@@ -102,6 +108,17 @@ export async function changeOrderStatus(orderId: string, status: OrderStatus, ex
 /** Ubicacion del repartidor (solo repartidor asignado y pedido en camino). */
 export async function sendDriverLocation(orderId: string, latitude: number, longitude: number): Promise<void> {
     await call("updateLocation", { orderId, latitude, longitude });
+}
+
+/** El repartidor acepta o rechaza el pedido que se le asigno. */
+export async function respondAssignment(orderId: string, accept: boolean): Promise<void> {
+    await call("respondAssignment", { orderId, accept });
+}
+
+/** El repartidor indica si esta disponible para recibir asignaciones. */
+export async function setDriverAvailability(available: boolean): Promise<boolean> {
+    const res = await call<{ available?: boolean }>("setAvailability", { available });
+    return res?.available === true;
 }
 
 /** true si el servidor rechazo porque el pedido cambio desde que se cargo la lista. */

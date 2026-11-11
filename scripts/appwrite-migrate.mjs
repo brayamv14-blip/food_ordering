@@ -41,6 +41,10 @@ const MENU =
 const EVENTS =
     process.env.APPWRITE_ORDER_EVENTS_TABLE_ID ?? 'order_events';
 
+// Debe coincidir con INVENTORY_MOVES_TABLE_ID de las Functions.
+const MOVES =
+    process.env.APPWRITE_INVENTORY_MOVES_TABLE_ID ?? 'inventory_movements';
+
 const apply = process.argv.includes('--apply');
 const rollback = process.argv.includes('--rollback');
 
@@ -52,6 +56,13 @@ const str = (key, size) => ({
 
 const flt = (key, min, max) => ({
     kind: 'float',
+    key,
+    min,
+    max
+});
+
+const int = (key, min, max) => ({
+    kind: 'integer',
     key,
     min,
     max
@@ -83,6 +94,10 @@ export const PLAN = {
             flt('deliveryLongitude', -180, 180),
             str('driverUserId', 64),
             str('driverName', 80),
+            // v8: respuesta del repartidor a la asignacion (pending | accepted). null en pedidos anteriores = aceptado.
+            str('driverResponse', 12),
+            // v9: true si el pedido reservo existencias. Las Functions que cancelan se niegan a hacerlo si no pueden devolverlas.
+            bool('stockReserved', false),
             flt('driverLatitude', -90, 90),
             flt('driverLongitude', -180, 180),
             dt('driverUpdatedAt'),
@@ -110,6 +125,11 @@ export const PLAN = {
                 key: 'idx_driverUserId',
                 type: TablesDBIndexType.Key,
                 columns: ['driverUserId']
+            },
+            {
+                key: 'idx_status',
+                type: TablesDBIndexType.Key,
+                columns: ['status']
             }
         ]
     },
@@ -119,10 +139,46 @@ export const PLAN = {
 
         // available permite marcar productos como agotados.
         columns: [
-            bool('available', true)
+            bool('available', true),
+            // v8: existencias. Sin valor (null) = el producto no controla inventario.
+            // Entero >= 0; las Functions lo modifican solo con operaciones atomicas (increment/decrement).
+            int('stock', 0, 1000000),
+            // v8: umbral de alerta de existencias bajas (por omision 5 en el servidor).
+            int('lowStockThreshold', 0, 1000000)
         ],
 
         indexes: []
+    },
+
+    [MOVES]: {
+        label: 'inventory_movements',
+
+        // v8. Tabla nueva, SIN permisos de cliente: solo las Functions escriben y leen.
+        // El rowId de cada movimiento es un hash determinista, lo que impide reservar o devolver dos veces.
+        isNew: true,
+
+        columns: [
+            str('orderId', 64),
+            str('menuId', 36),
+            str('type', 12),
+            int('quantity', 0, 1000000),
+            int('delta', -1000000, 1000000),
+            str('reason', 120),
+            str('actorId', 64)
+        ],
+
+        indexes: [
+            {
+                key: 'idx_orderId_type',
+                type: TablesDBIndexType.Key,
+                columns: ['orderId', 'type']
+            },
+            {
+                key: 'idx_menuId',
+                type: TablesDBIndexType.Key,
+                columns: ['menuId']
+            }
+        ]
     },
 
     [EVENTS]: {
@@ -353,6 +409,14 @@ export async function run(
 
             if (column.kind === 'float') {
                 await db.createFloatColumn({
+                    ...base,
+                    min: column.min,
+                    max: column.max
+                });
+            }
+
+            if (column.kind === 'integer') {
+                await db.createIntegerColumn({
                     ...base,
                     min: column.min,
                     max: column.max

@@ -1,7 +1,7 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
-import { Client, ID, Messaging, TablesDB } from 'node-appwrite';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { Client, ID, Messaging, Query, TablesDB } from 'node-appwrite';
 import {
-    buildOrderEvent, buildPaymentNotification, buildPushRequest, checkSessionPayment, isFreshTimestamp, movePaymentStatus,
+    buildOrderEvent, buildPaymentNotification, buildStatusNotification, makeInventory, buildPushRequest, checkSessionPayment, isFreshTimestamp, movePaymentStatus,
     parseStripeSignatureHeader, paymentIntentId, signedPayload, stripeEventToPayment, stripeRequest
 } from './rules.js';
 
@@ -19,6 +19,8 @@ const DB = process.env.DATABASE_ID;
 const ORDERS = process.env.ORDERS_TABLE_ID;
 const EVENTS = process.env.ORDER_EVENTS_TABLE_ID; // opcional
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY; // solo para reembolsar un pago tardio de un pedido cancelado
+const MENU = process.env.MENU_TABLE_ID;
+const MOVES = process.env.INVENTORY_MOVES_TABLE_ID;
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // whsec_..., nunca en la app
 
 const reply = (res, status, body) => res.json(body, status);
@@ -75,6 +77,17 @@ export default async ({ req, res, log, error }) => {
         } catch (e) {
             error(`push_failed: ${e.message}`);
         }
+    };
+
+    const inventory = makeInventory({ db, DB, MENU, MOVES, Query, hash: (s) => createHash('sha256').update(s).digest('hex') });
+    /** Devuelve el stock de un pedido cancelado (idempotente). Lanza si no puede, para que Stripe reintente. */
+    const releaseFor = async (order) => {
+        if (order.stockReserved !== true) return;
+        if (!inventory.enabled) {
+            error(`inventory_misconfigured order=${order.$id}`);
+            throw Object.assign(new Error('inventory_unavailable'), { code: 'inventory_unavailable' });
+        }
+        await inventory.release(order.$id);
     };
 
     try {
@@ -135,15 +148,43 @@ export default async ({ req, res, log, error }) => {
         if (change.kind === 'refunded') {
             const move = movePaymentStatus(current, 'refunded');
             if (move.ok && move.changed) {
-                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { paymentStatus: 'refunded' } });
+                // Un pedido que aun no se confirmo y ya esta reembolsado no se puede preparar: se cancela y devuelve su stock.
+                // Si el pedido ya avanzo (reembolso de cortesia desde Stripe), solo se registra: el personal decide.
+                const cancelToo = order.status === 'pending';
+                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { paymentStatus: 'refunded', ...(cancelToo ? { status: 'cancelled' } : {}) } });
                 await record(order, 'payment_refunded', order.status, order.status);
+                if (cancelToo) await record(order, 'status', 'pending', 'cancelled');
                 await notify(order.userId, buildPaymentNotification('refunded', order.$id));
             }
+            // Fuera del "if": si el reintento llega con el pedido ya cancelado, la devolucion pendiente se completa.
+            if (order.status === 'cancelled' || (move.ok && move.changed && order.status === 'pending')) await releaseFor(order);
             return reply(res, 200, { received: true });
         }
 
-        // expired: el pedido sigue pendiente y puede reintentarse con "Pagar ahora"; solo se deja constancia.
+        // expired: la sesion vencio sin cobro. Un pedido que sigue pendiente y sin pagar se cancela y devuelve su stock
+        // (si no, las reservas de pedidos abandonados bloquearian el inventario). Si ya se pago o avanzo, solo hay constancia.
         await record(order, 'payment_expired', order.status, order.status);
+        // Solo si la sesion vencida es la ULTIMA del pedido (si el cliente ya genero otra con "Pagar ahora", esta no cuenta).
+        const sessionId = change.session && change.session.id;
+        const isCurrent = !order.stripeSessionId || !sessionId || order.stripeSessionId === sessionId;
+        if (isCurrent) {
+            const cancelNow = order.status === 'pending' && ['pending', 'failed'].includes(current);
+            if (cancelNow) {
+                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { status: 'cancelled', paymentStatus: 'cancelled' } });
+                await record(order, 'status', 'pending', 'cancelled');
+            }
+            // Tambien en el REINTENTO de Stripe: si la devolucion fallo la vez anterior, el pedido ya esta cancelado y aqui se completa.
+            // Un pedido cancelado y no pagado (current cancelled) o recien cancelado devuelve su stock; uno pagado/reembolsado no pasa por aqui.
+            if (cancelNow || (order.status === 'cancelled' && ['cancelled', 'pending', 'failed'].includes(current))) {
+                try {
+                    await releaseFor(order);
+                } catch (e) {
+                    error(`release_failed order=${order.$id}: ${e.message}`);
+                    return reply(res, 500, { code: 'release_failed' }); // Stripe reintenta; liberar es idempotente
+                }
+                if (cancelNow) await notify(order.userId, buildStatusNotification('cancelled', order.$id));
+            }
+        }
         return reply(res, 200, { received: true });
     } catch (e) {
         error(e.message);

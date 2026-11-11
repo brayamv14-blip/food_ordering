@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react-
 jest.mock("expo-router", () => ({ router: { back: jest.fn(), push: jest.fn(), replace: jest.fn() } }));
 const mockRoles = jest.fn();
 jest.mock("@/lib/services/roles", () => ({ getMyRoles: () => mockRoles() }));
-const mockList = jest.fn(), mockDrivers = jest.fn(), mockAssign = jest.fn(), mockChange = jest.fn(), mockMine = jest.fn(), mockSend = jest.fn(), mockHistory = jest.fn();
+const mockList = jest.fn(), mockDrivers = jest.fn(), mockAssign = jest.fn(), mockChange = jest.fn(), mockMine = jest.fn(), mockSend = jest.fn(), mockHistory = jest.fn(), mockRespond = jest.fn(), mockAvail = jest.fn();
 jest.mock("@/lib/services/staff.service", () => ({
     sendDriverLocation: (...a: any[]) => mockSend(...a),
     getOrderHistory: (...a: any[]) => mockHistory(...a),
@@ -14,6 +14,8 @@ jest.mock("@/lib/services/staff.service", () => ({
     assignDriver: (...a: any[]) => mockAssign(...a),
     changeOrderStatus: (...a: any[]) => mockChange(...a),
     listMyDeliveries: (...a: any[]) => mockMine(...a),
+    respondAssignment: (...a: any[]) => mockRespond(...a),
+    setDriverAvailability: (...a: any[]) => mockAvail(...a),
     describeBackendError: (e: any) => e?.message ?? "error"
 }));
 const mockPosition = jest.fn();
@@ -243,11 +245,70 @@ describe("pantalla del repartidor: navegación e historial", () => {
     it("el historial pide solo entregas terminadas y no ofrece acciones de reparto", async () => {
         mockMine.mockResolvedValue([order({ id: "ordact01" })]);
         render(<DriverDeliveries />);
-        await screen.findByText("Salir a reparto");
+        await screen.findByText("Ya recogí el pedido");
         mockMine.mockResolvedValue([order({ id: "ordhis01", status: "delivered" })]);
         fireEvent.press(screen.getByText("Historial"));
         await waitFor(() => expect(mockMine).toHaveBeenLastCalledWith(true));
-        await waitFor(() => expect(screen.queryByText("Salir a reparto")).toBeNull());
+        await waitFor(() => expect(screen.queryByText("Ya recogí el pedido")).toBeNull());
         expect(screen.queryByLabelText("Navegar al cliente")).toBeNull();
+    });
+});
+
+describe("pantalla del repartidor: asignación, recogido y disponibilidad", () => {
+    beforeEach(() => { mockRoles.mockResolvedValue({ staff: false, driver: true }); mockRespond.mockResolvedValue(undefined); mockChange.mockResolvedValue(undefined); });
+
+    it("una asignación pendiente solo ofrece aceptar o rechazar (no recoger ni salir)", async () => {
+        mockMine.mockResolvedValue([order({ status: "preparing", driverUserId: "me", driverResponse: "pending" })]);
+        render(<DriverDeliveries />);
+        await screen.findByText("Aceptar");
+        expect(screen.getByText("Rechazar")).toBeTruthy();
+        expect(screen.queryByText("Ya recogí el pedido")).toBeNull();
+        fireEvent.press(screen.getByText("Aceptar"));
+        await waitFor(() => expect(mockRespond).toHaveBeenCalledWith("ord12345", true));
+    });
+
+    it("rechazar llama al servidor con accept=false", async () => {
+        mockMine.mockResolvedValue([order({ status: "preparing", driverUserId: "me", driverResponse: "pending" })]);
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByText("Rechazar"));
+        await waitFor(() => expect(mockRespond).toHaveBeenCalledWith("ord12345", false));
+    });
+
+    it("recogido y salir a reparto son pasos distintos", async () => {
+        mockMine.mockResolvedValue([order({ status: "ready", driverUserId: "me", driverResponse: "accepted" })]);
+        render(<DriverDeliveries />);
+        const pickup = await screen.findByText("Ya recogí el pedido");
+        // Tras cambiar el estado la pantalla recarga: el servidor ya devuelve "recogido".
+        mockMine.mockResolvedValue([order({ status: "picked_up", driverUserId: "me", driverResponse: "accepted" })]);
+        fireEvent.press(pickup);
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "picked_up"));
+        fireEvent.press(await screen.findByText("Salir a reparto"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "on_the_way"));
+    });
+
+    it("la entrega fallida se puede reintentar", async () => {
+        mockMine.mockResolvedValue([order({ status: "delivery_failed", driverUserId: "me" })]);
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByText("Reintentar entrega"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "on_the_way"));
+    });
+
+    it("desde \"recogido\" se puede reportar entrega fallida (con confirmación)", async () => {
+        mockMine.mockResolvedValue([order({ status: "picked_up", driverUserId: "me", driverResponse: "accepted" })]);
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByText("No pude entregar"));
+        expect(Alert.alert).toHaveBeenCalledWith("Entrega fallida", expect.any(String), expect.any(Array));
+        const buttons = (Alert.alert as jest.Mock).mock.calls.at(-1)[2];
+        await act(async () => { buttons.find((b: any) => b.text === "Sí, registrar").onPress(); });
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "delivery_failed"));
+    });
+
+    it("el interruptor de disponibilidad se guarda en el servidor", async () => {
+        mockAvail.mockResolvedValue(false);
+        mockMine.mockResolvedValue([]);
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByLabelText("Disponible para recibir pedidos"));
+        await waitFor(() => expect(mockAvail).toHaveBeenCalledWith(false));
+        await screen.findByText(/No disponible/);
     });
 });

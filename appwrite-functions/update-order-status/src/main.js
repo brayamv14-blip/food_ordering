@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { Client, ID, Messaging, Query, TablesDB, Users } from 'node-appwrite';
 import {
-    ACTIVE_DELIVERY, buildAssignmentNotification, buildCheckoutSessionParams, buildOrderEvent, buildPaymentNotification,
+    ACTIVE_DELIVERY, buildAssignmentNotification, buildDriverRejectedNotification, makeInventory, pickDriver, buildCheckoutSessionParams, buildOrderEvent, buildPaymentNotification,
     buildPushRequest, buildStatusNotification, canActorTransition, canAssignDriver, checkExpected, checkSessionPayment,
     isStripeCheckoutUrl, matchesOrderQuery, movePaymentStatus, parseDateRange, paymentIntentId, stripeRequest,
     toStaffOrderView, validateDriverPosition
@@ -26,7 +27,12 @@ const ITEMS = process.env.ORDER_ITEMS_TABLE_ID;
 const EVENTS = process.env.ORDER_EVENTS_TABLE_ID; // opcional
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY; // solo en la Function; necesario para pagos y reembolsos
 const PAYMENT_RETURN_URL = process.env.PAYMENT_RETURN_URL; // https de recovery-bridge/payment-return.html
-const STATUSES = ['pending', 'confirmed', 'preparing', 'on_the_way', 'delivered', 'cancelled'];
+const MENU = process.env.MENU_TABLE_ID;
+const MOVES = process.env.INVENTORY_MOVES_TABLE_ID; // sin ella no se controla inventario
+// Asignacion automatica de repartidor al pasar a "preparing" (apagada por omision).
+const AUTO_ASSIGN = process.env.AUTO_ASSIGN_DRIVER === 'true';
+const MAX_ACTIVE_PER_DRIVER = Number(process.env.MAX_ACTIVE_PER_DRIVER ?? 3);
+const STATUSES = ['pending', 'confirmed', 'preparing', 'ready', 'picked_up', 'on_the_way', 'delivery_failed', 'delivered', 'cancelled'];
 
 const fail = (res, status, code, error) => res.json({ code, error }, status);
 
@@ -72,6 +78,44 @@ export default async ({ req, res, log, error }) => {
         }
     };
 
+    const inventory = makeInventory({ db, DB, MENU, MOVES, Query, hash: (s) => createHash('sha256').update(s).digest('hex') });
+    /** Devuelve el stock reservado del pedido (idempotente). Un fallo se registra y se puede reintentar. */
+    const releaseStock = async (orderId) => {
+        try {
+            await inventory.release(orderId);
+            return true;
+        } catch (e) {
+            error(`release_failed order=${orderId}: ${e.message}`);
+            return false;
+        }
+    };
+    const notifyStaff = async (message) => {
+        try {
+            const staff = await users.list({ queries: [Query.equal('labels', ['staff', 'admin']), Query.limit(50)] });
+            for (const s of staff.users) await notify(s.$id, message);
+        } catch (e) {
+            error(`staff_notify_failed: ${e.message}`);
+        }
+    };
+    const driverIsAvailable = (u) => !(u && u.prefs && u.prefs.driverAvailable === false);
+    /** Asignacion automatica: repartidor disponible con menos entregas activas. Devuelve true si asigno. */
+    const autoAssign = async (order, excludeId = null) => {
+        if (!AUTO_ASSIGN || order.driverUserId) return false;
+        const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(50)] });
+        const active = (await db.listRows({ databaseId: DB, tableId: ORDERS, queries: [Query.equal('status', ACTIVE_DELIVERY), Query.limit(200)] })).rows;
+        const load = {};
+        for (const o of active) if (o.driverUserId) load[o.driverUserId] = (load[o.driverUserId] || 0) + 1;
+        const chosen = pickDriver(
+            list.users.filter((u) => u.$id !== excludeId).map((u) => ({ id: u.$id, name: u.name, available: driverIsAvailable(u), active: load[u.$id] || 0 })),
+            { maxActive: MAX_ACTIVE_PER_DRIVER }
+        );
+        if (!chosen) return false;
+        await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { driverUserId: chosen.id, driverName: String(chosen.name || 'Repartidor').slice(0, 80), driverResponse: 'pending', driverLatitude: null, driverLongitude: null } });
+        await record({ orderId: order.$id, type: 'driver_assigned', from: order.status, to: order.status, actorId: 'system', actorRole: 'system', driverUserId: chosen.id });
+        await notify(chosen.id, buildAssignmentNotification(order.$id));
+        return true;
+    };
+
     const stripe = (opts) => stripeRequest({ secret: STRIPE_KEY, ...opts });
 
     /** Consulta la sesion de Stripe del pedido (con su PaymentIntent). */
@@ -108,7 +152,7 @@ export default async ({ req, res, log, error }) => {
     try {
         const me = await users.get({ userId });
         const labels = me.labels ?? [];
-        const isStaff = labels.includes('staff');
+        const isStaff = labels.includes('staff') || labels.includes('admin');
         const isDriver = labels.includes('driver');
         const actor = isStaff ? 'staff' : isDriver ? 'driver' : 'customer';
         const needStaff = () => (isStaff ? null : fail(res, 403, 'forbidden', 'Solo personal autorizado.'));
@@ -129,11 +173,17 @@ export default async ({ req, res, log, error }) => {
                 if (!stale.ok) return fail(res, 409, stale.code, stale.error);
 
                 const verdict = canActorTransition({
-                    actor, isOwner, from: order.status, to, hasDriver: !!order.driverUserId,
+                    actor, isOwner, from: order.status, to, hasDriver: !!order.driverUserId, driverAccepted: (order.driverResponse || 'accepted') === 'accepted',
                     payment: { method: order.paymentMethod || 'cash_on_delivery', status: order.paymentStatus || null }
                 });
                 if (!verdict.ok) return fail(res, verdict.code === 'forbidden' ? 403 : 409, verdict.code, verdict.error);
 
+                // Cancelar devuelve existencias: si el pedido las reservo y esta Function no puede devolverlas
+                // (falta INVENTORY_MOVES_TABLE_ID), se rechaza ANTES de reembolsar o cancelar: nada se pierde en silencio.
+                if (to === 'cancelled' && order.stockReserved === true && !inventory.enabled) {
+                    error(`inventory_misconfigured order=${orderId}`);
+                    return fail(res, 503, 'inventory_unavailable', 'El inventario no está configurado en el servidor; no se puede cancelar sin devolver existencias.');
+                }
                 const data = { status: to };
                 const online = order.paymentMethod === 'online';
                 let refunded = false;
@@ -159,7 +209,7 @@ export default async ({ req, res, log, error }) => {
                     }
                 }
                 // Al terminar el pedido no se conserva la ubicacion del repartidor.
-                if (to === 'delivered' || to === 'cancelled') {
+                if (to === 'delivered' || to === 'cancelled' || to === 'delivery_failed') {
                     data.driverLatitude = null;
                     data.driverLongitude = null;
                 }
@@ -167,9 +217,16 @@ export default async ({ req, res, log, error }) => {
                 await record({ orderId, type: 'status', from: order.status, to, actorId: userId, actorRole: actor, driverUserId: order.driverUserId ?? null });
                 // Al cliente se le avisa de los cambios hechos por el restaurante o el repartidor (no de los suyos).
                 if (refunded) await record({ orderId, type: 'payment_refunded', from: order.status, to, actorId: userId, actorRole: actor });
+                // Cancelar devuelve el stock reservado (tambien tras un reembolso). Idempotente: no se devuelve dos veces.
+                let stockRelease = 'n/a';
+                if (to === 'cancelled' && order.stockReserved === true) {
+                    stockRelease = (await releaseStock(orderId)) ? 'done' : 'pending';
+                    if (stockRelease === 'pending') await record({ orderId, type: 'stock_release_failed', from: order.status, to, actorId: userId, actorRole: actor });
+                }
                 if (actor !== 'customer') await notify(order.userId, buildStatusNotification(to, orderId));
+                if (to === 'preparing' && !order.driverUserId) await autoAssign(updated).catch((e) => error(`auto_assign_failed: ${e.message}`));
                 if (refunded) await notify(order.userId, buildPaymentNotification('refunded', orderId));
-                return res.json({ orderId: updated.$id, status: updated.status, updatedAt: updated.$updatedAt ?? null });
+                return res.json({ orderId: updated.$id, status: updated.status, updatedAt: updated.$updatedAt ?? null, ...(stockRelease === 'pending' ? { stockRelease } : {}) });
             }
 
             case 'syncPayment': {
@@ -288,7 +345,10 @@ export default async ({ req, res, log, error }) => {
                 const denied = needStaff();
                 if (denied) return denied;
                 const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(50)] });
-                return res.json({ drivers: list.users.map((u) => ({ id: u.$id, name: u.name || 'Repartidor' })) });
+                const active = (await db.listRows({ databaseId: DB, tableId: ORDERS, queries: [Query.equal('status', ACTIVE_DELIVERY), Query.limit(200)] })).rows;
+                const load = {};
+                for (const o of active) if (o.driverUserId) load[o.driverUserId] = (load[o.driverUserId] || 0) + 1;
+                return res.json({ drivers: list.users.map((u) => ({ id: u.$id, name: u.name || 'Repartidor', available: driverIsAvailable(u), activeOrders: load[u.$id] || 0 })) });
             }
 
             case 'assignDriver': {
@@ -303,16 +363,72 @@ export default async ({ req, res, log, error }) => {
                 if (!stale.ok) return fail(res, 409, stale.code, stale.error);
                 if (!canAssignDriver(order.status)) return fail(res, 409, 'not_assignable', 'El pedido ya terminó.');
                 const changed = order.driverUserId !== driverUserId;
+                // Mismo repartidor: no se vuelve a asignar ni a notificar (evita duplicados).
+                if (!changed) return res.json({ orderId: order.$id, driverName: order.driverName, duplicate: true, updatedAt: order.$updatedAt ?? null });
+                // Una vez recogido el pedido ya va en manos de otro repartidor: no se reasigna a mitad del trayecto.
+                if (order.driverUserId && ['picked_up', 'on_the_way'].includes(order.status)) {
+                    return fail(res, 409, 'in_transit', 'El pedido ya va en camino; no se puede cambiar de repartidor.');
+                }
+                if (!driverIsAvailable(driver)) return fail(res, 422, 'driver_unavailable', 'Ese repartidor no está disponible.');
                 const updated = await db.updateRow({
                     databaseId: DB, tableId: ORDERS, rowId: orderId,
                     // Si cambia el repartidor, se descarta la ubicacion del anterior.
-                    data: { driverUserId, driverName: String(driver.name || 'Repartidor').slice(0, 80), ...(changed ? { driverLatitude: null, driverLongitude: null } : {}) }
+                    data: { driverUserId, driverName: String(driver.name || 'Repartidor').slice(0, 80), driverResponse: 'pending', driverLatitude: null, driverLongitude: null }
                 });
-                if (changed) {
-                    await record({ orderId, type: 'driver_assigned', from: order.status, to: order.status, actorId: userId, actorRole: 'staff', driverUserId });
-                    await notify(driverUserId, buildAssignmentNotification(orderId));
+                // Sin escritura condicional en Appwrite: si otra persona del personal asigno a otro repartidor al mismo
+                // tiempo, gana la ultima escritura. Se relee para que quien perdio reciba un 409 en vez de un falso exito
+                // (y para no notificar a un repartidor que ya no tiene el pedido).
+                const confirmed = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (confirmed.driverUserId !== driverUserId) {
+                    return fail(res, 409, 'assignment_conflict', 'Otra persona asignó este pedido al mismo tiempo. Revisa el estado actual.');
                 }
+                await record({ orderId, type: 'driver_assigned', from: order.status, to: order.status, actorId: userId, actorRole: 'staff', driverUserId });
+                await notify(driverUserId, buildAssignmentNotification(orderId));
                 return res.json({ orderId: updated.$id, driverName: updated.driverName, updatedAt: updated.$updatedAt ?? null });
+            }
+
+            case 'setAvailability': {
+                if (!isDriver) return fail(res, 403, 'forbidden', 'Solo repartidores.');
+                if (typeof body.available !== 'boolean') return fail(res, 400, 'bad_request', 'Indica si estás disponible.');
+                // Las preferencias se reemplazan completas en Appwrite: se conservan las demas.
+                await users.updatePrefs({ userId, prefs: { ...(me.prefs || {}), driverAvailable: body.available } });
+                return res.json({ available: body.available });
+            }
+
+            case 'respondAssignment': {
+                if (!isDriver) return fail(res, 403, 'forbidden', 'Solo repartidores.');
+                const { orderId, accept } = body;
+                if (typeof orderId !== 'string' || typeof accept !== 'boolean') return fail(res, 400, 'bad_request', 'Datos incompletos.');
+                const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (order.driverUserId !== userId) return fail(res, 403, 'forbidden', 'Este pedido no está asignado a ti.');
+                // Un pedido terminado (entregado/cancelado) ya no se acepta ni se rechaza: rechazarlo borraria el repartidor del historial.
+                if (!canAssignDriver(order.status)) return fail(res, 409, 'not_assignable', 'El pedido ya terminó.');
+                const current = order.driverResponse || 'accepted';
+                if (accept) {
+                    if (current === 'accepted') return res.json({ orderId, driverResponse: 'accepted', duplicate: true });
+                    await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data: { driverResponse: 'accepted' } });
+                    // Appwrite no tiene escritura condicional: si el personal reasigno el pedido entre la lectura y la
+                    // escritura, la aceptacion habria caido sobre OTRO repartidor. Se relee y se revierte.
+                    const check = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                    if (check.driverUserId !== userId) {
+                        await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data: { driverResponse: 'pending' } });
+                        return fail(res, 409, 'assignment_changed', 'El pedido fue reasignado a otra persona.');
+                    }
+                    await record({ orderId, type: 'driver_accepted', from: order.status, to: order.status, actorId: userId, actorRole: 'driver', driverUserId: userId });
+                    return res.json({ orderId, driverResponse: 'accepted' });
+                }
+                // Rechazar solo se puede antes de recoger el pedido; despues, el personal debe atenderlo.
+                if (['picked_up', 'on_the_way'].includes(order.status)) {
+                    return fail(res, 409, 'in_transit', 'El pedido ya va en camino; avisa al personal.');
+                }
+                // Ultima comprobacion antes de borrar: si el personal ya reasigno, no se pisa la asignacion nueva.
+                const fresh = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (fresh.driverUserId !== userId) return fail(res, 409, 'assignment_changed', 'El pedido fue reasignado a otra persona.');
+                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data: { driverUserId: null, driverName: null, driverResponse: null, driverLatitude: null, driverLongitude: null } });
+                await record({ orderId, type: 'driver_rejected', from: order.status, to: order.status, actorId: userId, actorRole: 'driver', driverUserId: userId });
+                const reassigned = await autoAssign({ ...order, driverUserId: null }, userId).catch((e) => { error(`auto_assign_failed: ${e.message}`); return false; });
+                if (!reassigned) await notifyStaff(buildDriverRejectedNotification(orderId, me.name));
+                return res.json({ orderId, driverResponse: 'rejected', reassigned });
             }
 
             case 'orderHistory': {

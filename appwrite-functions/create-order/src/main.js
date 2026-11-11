@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { Client, ID, Messaging, Permission, Query, Role, TablesDB, Users } from 'node-appwrite';
 import {
-    buildCheckoutSessionParams, buildOrderEvent, buildOrderReceivedNotification, buildPushRequest, isStripeCheckoutUrl,
-    priceOrder, stripeRequest, validateAddressInput, checkCoverage, validatePaymentMethod, validatePhone
+    buildCheckoutSessionParams, buildLowStockNotification, buildOrderEvent, checkStock, makeInventory, buildOrderReceivedNotification, buildPushRequest, isStripeCheckoutUrl,
+    priceOrder, stripeRequest, validateAddressInput, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID, validatePaymentMethod, validatePhone
 } from './rules.js';
 
 const DB = process.env.DATABASE_ID;
@@ -12,6 +13,8 @@ const CUSTOMIZATIONS = process.env.CUSTOMIZATIONS_TABLE_ID;
 // Relacion producto <-> extras (tabla menu_customizations: columnas `menu` y `customizations`).
 const MENU_CUSTOMIZATIONS = process.env.MENU_CUSTOMIZATIONS_TABLE_ID;
 const EVENTS = process.env.ORDER_EVENTS_TABLE_ID; // opcional: historial de cambios
+// Historial de movimientos de inventario. Sin esta variable el control de existencias queda DESACTIVADO.
+const MOVES = process.env.INVENTORY_MOVES_TABLE_ID;
 const DELIVERY_FEE = Number(process.env.DELIVERY_FEE ?? 5);
 const DISCOUNT = Number(process.env.DISCOUNT ?? 0.5);
 // Pago en linea (Stripe Checkout alojado). Sin estas variables el pago en linea se rechaza.
@@ -104,6 +107,17 @@ export default async ({ req, res, log, error }) => {
             return res.json({ orderId: existing.rows[0].$id, duplicate: true });
         }
 
+        // Limite anti-abuso: demasiados pedidos en linea sin pagar generarian muchas sesiones de Stripe.
+        if (online) {
+            const recent = (await db.listRows({
+                databaseId: DB, tableId: ORDERS,
+                queries: [Query.equal('userId', userId), Query.orderDesc('$createdAt'), Query.limit(30)]
+            })).rows;
+            if (countOpenUnpaid(recent) >= MAX_OPEN_UNPAID) {
+                return fail(res, 429, 'too_many_open_orders', 'Tienes varios pedidos en línea sin pagar. Paga o cancela alguno antes de crear otro.');
+            }
+        }
+
         if (!Array.isArray(items)) return fail(res, 422, 'empty_cart', 'El pedido no tiene productos.');
         const menuIds = [...new Set(items.map((i) => i && i.menuId).filter((x) => typeof x === 'string'))];
         const extraIds = [...new Set(items.flatMap((i) => (i && Array.isArray(i.customizationIds) ? i.customizationIds : [])).filter((x) => typeof x === 'string'))];
@@ -139,29 +153,66 @@ export default async ({ req, res, log, error }) => {
         });
         if (!priced.ok) return fail(res, 422, priced.code, priced.error);
 
+        // Inventario: validacion previa (mensaje claro) y reserva atomica mas abajo (la que de verdad protege).
+        const menuById = Object.fromEntries(menuRows.map((r) => [r.$id, r]));
+        const stockCheck = MOVES ? checkStock(priced.lines, menuById) : { ok: true, totals: {} };
+        if (!stockCheck.ok) return fail(res, 409, stockCheck.code, stockCheck.error);
+
         // El nombre sale de la cuenta, no del cliente.
         const account = await users.get({ userId });
 
-        const order = await db.createRow({
-            databaseId: DB, tableId: ORDERS, rowId: ID.unique(), permissions,
-            data: {
-                userId,
-                status: 'pending',
-                subtotal: priced.subtotal,
-                total: priced.total,
-                deliveryFee: priced.deliveryFee,
-                discount: priced.discount,
-                paymentMethod: pay.method,
-                paymentStatus: online ? 'pending' : 'not_required',
-                clientRequestId,
-                customerName: String(account.name ?? '').slice(0, 80),
-                customerPhone: phone.phone.slice(0, 20),
-                deliveryAddress: addr.line,
-                deliveryAddressLabel: addr.label,
-                deliveryLatitude: addr.latitude,
-                deliveryLongitude: addr.longitude
+        // Reserva de existencias ANTES de crear el pedido (descuento atomico en el servidor). Con el id del pedido
+        // decidido de antemano, cualquier fallo posterior puede devolver exactamente lo reservado (idempotente).
+        const orderId = ID.unique();
+        const inventory = makeInventory({ db, DB, MENU, MOVES, Query, hash: (s) => createHash('sha256').update(s).digest('hex') });
+        let reservation;
+        try {
+            reservation = await inventory.reserve({ orderId, totals: stockCheck.totals, menuById });
+        } catch (e) {
+            error(`reserve_failed: ${e.message}${e.leak ? ` LEAK menu=${e.leak.menuId} qty=${e.leak.qty}` : ''}`);
+            return fail(res, 500, 'internal', 'No se pudo reservar el inventario.');
+        }
+        if (!reservation.ok) return fail(res, 409, reservation.code, reservation.error);
+        const rollbackStock = async () => {
+            if (!inventory.enabled) return;
+            await inventory.release(orderId, 'order_rolled_back').catch((e) => error(`release_failed order=${orderId}: ${e.message}`));
+        };
+
+        let order;
+        try {
+            order = await db.createRow({
+                databaseId: DB, tableId: ORDERS, rowId: orderId, permissions,
+                data: {
+                    userId,
+                    status: 'pending',
+                    subtotal: priced.subtotal,
+                    total: priced.total,
+                    deliveryFee: priced.deliveryFee,
+                    discount: priced.discount,
+                    paymentMethod: pay.method,
+                    paymentStatus: online ? 'pending' : 'not_required',
+                    // true => hay existencias reservadas que se devuelven al cancelar. Las Functions que cancelan se
+                    // niegan a hacerlo si no pueden devolverlas (INVENTORY_MOVES_TABLE_ID ausente).
+                    stockReserved: reservation.reserved.length > 0,
+                    clientRequestId,
+                    customerName: String(account.name ?? '').slice(0, 80),
+                    customerPhone: phone.phone.slice(0, 20),
+                    deliveryAddress: addr.line,
+                    deliveryAddressLabel: addr.label,
+                    deliveryLatitude: addr.latitude,
+                    deliveryLongitude: addr.longitude
+                }
+            });
+        } catch (e) {
+            await rollbackStock();
+            // Dos solicitudes simultaneas con el mismo intento: el indice unico deja pasar solo una; la otra devuelve ese pedido.
+            if (e && (e.code === 409 || /already exists/i.test(String(e.message || '')))) {
+                const again = await db.listRows({ databaseId: DB, tableId: ORDERS, queries: [Query.equal('clientRequestId', clientRequestId), Query.limit(1)] });
+                if (again.rows[0] && again.rows[0].userId === userId) return res.json({ orderId: again.rows[0].$id, duplicate: true });
+                return fail(res, 409, 'conflict', 'Identificador en uso.');
             }
-        });
+            throw e;
+        }
 
         const created = [];
         try {
@@ -174,6 +225,7 @@ export default async ({ req, res, log, error }) => {
             }
         } catch (e) {
             error(`items_failed: ${e.message}`);
+            await rollbackStock();
             for (const id of created) await db.deleteRow({ databaseId: DB, tableId: ITEMS, rowId: id }).catch(() => {});
             await db.deleteRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id }).catch(() => {});
             return fail(res, 500, 'items_failed', 'No se pudieron guardar los productos.');
@@ -200,7 +252,8 @@ export default async ({ req, res, log, error }) => {
                 }
             }
             if (!saved) {
-                // Sin sesion de pago el pedido no se puede completar: se deshace todo.
+                // Sin sesion de pago el pedido no se puede completar: se deshace todo (tambien el inventario).
+                await rollbackStock();
                 for (const id of created) await db.deleteRow({ databaseId: DB, tableId: ITEMS, rowId: id }).catch(() => {});
                 await db.deleteRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id }).catch(() => {});
                 return fail(res, 502, 'payment_unavailable', 'No se pudo iniciar el pago en línea. Inténtalo de nuevo.');
@@ -209,6 +262,16 @@ export default async ({ req, res, log, error }) => {
         } else {
             // Efectivo: el pedido ya esta recibido. En linea se avisa cuando Stripe confirma el pago.
             await notify(userId, buildOrderReceivedNotification(order.$id));
+        }
+
+        // Alerta de existencias bajas al personal (mejor esfuerzo, una vez al cruzar el umbral).
+        if (reservation.low && reservation.low.length) {
+            try {
+                const staff = await users.list({ queries: [Query.equal('labels', ['staff', 'admin']), Query.limit(50)] });
+                for (const l of reservation.low) for (const s of staff.users) await notify(s.$id, buildLowStockNotification(l.name, l.stock));
+            } catch (e) {
+                error(`low_stock_notify_failed: ${e.message}`);
+            }
         }
 
         log(`order ${order.$id} created`);

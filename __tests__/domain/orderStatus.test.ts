@@ -32,17 +32,47 @@ describe("estados del pedido", () => {
         expect(ALLOWED_TRANSITIONS.delivered).toHaveLength(0);
     });
 
+    it("incluye listo para recoger (opcional) y entrega fallida", () => {
+        expect(canTransition("preparing", "ready")).toBe(true);
+        expect(canTransition("preparing", "on_the_way")).toBe(true); // `ready` no es obligatorio
+        expect(canTransition("ready", "on_the_way")).toBe(true);
+        expect(canTransition("ready", "delivered")).toBe(false);
+        expect(canTransition("on_the_way", "delivery_failed")).toBe(true);
+        expect(canTransition("delivery_failed", "on_the_way")).toBe(true);
+        expect(canTransition("delivery_failed", "cancelled")).toBe(true);
+        expect(canTransition("delivery_failed", "delivered")).toBe(false);
+        expect(isTerminalStatus("delivery_failed")).toBe(false);
+        expect(isTrackable("delivery_failed")).toBe(false);
+        expect(getStatusMeta("ready").label).toBe("Listo para recoger");
+        expect(getStatusMeta("delivery_failed").label).toBe("Entrega fallida");
+    });
+
+    it("\"recogido\" es un estado propio entre listo y en camino", () => {
+        expect(canTransition("ready", "picked_up")).toBe(true);
+        expect(canTransition("preparing", "picked_up")).toBe(true);
+        expect(canTransition("picked_up", "on_the_way")).toBe(true);
+        expect(canTransition("picked_up", "delivered")).toBe(false);
+        expect(canTransition("picked_up", "delivery_failed")).toBe(true); // sin callejón sin salida
+        expect(canTransition("picked_up", "cancelled")).toBe(false);
+        expect(getStatusMeta("picked_up").label).toBe("Recogido");
+        expect(getProgressIndex("picked_up")).toBe(getProgressIndex("ready"));
+        expect(isTrackable("picked_up")).toBe(false);
+        expect(canCustomerCancel("picked_up")).toBe(false);
+    });
+
     it("el cliente solo cancela pedidos pendientes", () => {
         expect(canCustomerCancel("pending")).toBe(true);
-        for (const s of ["confirmed", "preparing", "on_the_way", "delivered", "cancelled", "x", null]) {
+        for (const s of ["confirmed", "preparing", "ready", "on_the_way", "delivery_failed", "delivered", "cancelled", "x", null]) {
             expect(canCustomerCancel(s)).toBe(false);
         }
     });
 
     it("calcula el progreso y detecta estados finales/seguibles", () => {
-        expect(PROGRESS_STEPS).toHaveLength(5);
+        expect(PROGRESS_STEPS).toHaveLength(6);
         expect(getProgressIndex("pending")).toBe(0);
-        expect(getProgressIndex("delivered")).toBe(4);
+        expect(getProgressIndex("delivered")).toBe(5);
+        expect(getProgressIndex("ready")).toBe(3);
+        expect(getProgressIndex("delivery_failed")).toBe(-1);
         expect(getProgressIndex("cancelled")).toBe(-1);
         expect(getProgressIndex("???")).toBe(-1);
         expect(isTerminalStatus("delivered")).toBe(true);

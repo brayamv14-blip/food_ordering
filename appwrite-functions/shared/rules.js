@@ -8,14 +8,22 @@
 const TRANSITIONS = {
     pending: ['confirmed', 'cancelled'],
     confirmed: ['preparing', 'cancelled'],
-    preparing: ['on_the_way'],
-    on_the_way: ['delivered'],
+    // `ready` (listo para recoger) es opcional: se puede pasar de preparing a on_the_way directamente.
+    // Flujo del repartidor: ready (listo en cocina) -> picked_up (el repartidor ya tiene el pedido) -> on_the_way
+    // (salio hacia el cliente). Ambos pasos intermedios son opcionales; "recogido" y "en camino" son estados distintos.
+    preparing: ['ready', 'picked_up', 'on_the_way'],
+    ready: ['picked_up', 'on_the_way'],
+    // Desde "recogido" tambien se puede reportar fallo (cliente ilocalizable antes de salir): no hay callejon sin salida.
+    picked_up: ['on_the_way', 'delivery_failed'],
+    on_the_way: ['delivered', 'delivery_failed'],
+    // Entrega fallida: el personal decide reintentar (on_the_way) o cancelar (con reembolso si estaba pagado).
+    delivery_failed: ['on_the_way', 'cancelled'],
     delivered: [],
     cancelled: []
 };
 
 /** Que rol puede pedir cada transicion. El cliente solo cancela pedidos pendientes. */
-function canActorTransition({ actor, isOwner, from, to, hasDriver = true, payment = null }) {
+function canActorTransition({ actor, isOwner, from, to, hasDriver = true, driverAccepted = true, payment = null }) {
     if (!TRANSITIONS[from] || !TRANSITIONS[from].includes(to)) {
         return { ok: false, code: 'invalid_transition', error: 'Transición no permitida.' };
     }
@@ -28,14 +36,19 @@ function canActorTransition({ actor, isOwner, from, to, hasDriver = true, paymen
     if (actor === 'customer' && to === 'cancelled' && online && payment.status === 'paid') {
         return { ok: false, code: 'refund_needed', error: 'Este pedido ya está pagado. Contacta al restaurante para cancelarlo y gestionar el reembolso.' };
     }
-    if (to === 'on_the_way' && !hasDriver) {
+    if ((to === 'on_the_way' || to === 'picked_up') && !hasDriver) {
         return { ok: false, code: 'driver_required', error: 'Asigna un repartidor antes de enviar el pedido.' };
+    }
+    // El repartidor debe haber aceptado la asignacion (los pedidos asignados antes de v8 cuentan como aceptados).
+    if ((to === 'on_the_way' || to === 'picked_up') && hasDriver && driverAccepted === false) {
+        return { ok: false, code: 'assignment_pending', error: 'El repartidor todavía no acepta la asignación.' };
     }
     if (actor === 'staff') return { ok: true };
     if (actor === 'driver') {
-        if ((from === 'preparing' && to === 'on_the_way') || (from === 'on_the_way' && to === 'delivered')) {
-            return { ok: true };
-        }
+        const ok = ((from === 'preparing' || from === 'ready') && (to === 'picked_up' || to === 'on_the_way')) ||
+            (from === 'picked_up' && (to === 'on_the_way' || to === 'delivery_failed')) || (from === 'delivery_failed' && to === 'on_the_way') ||
+            (from === 'on_the_way' && (to === 'delivered' || to === 'delivery_failed'));
+        if (ok) return { ok: true };
         return { ok: false, code: 'forbidden', error: 'Un repartidor no puede hacer ese cambio.' };
     }
     // cliente
@@ -135,6 +148,16 @@ function validateAddressInput(address) {
     return { ok: true, line, label, latitude, longitude };
 }
 
+/** Maximo de pedidos en linea sin pagar por usuario (evita abusar de sesiones de Stripe). */
+const MAX_OPEN_UNPAID = 5;
+
+/** Cuenta los pedidos en linea pendientes de pago entre las filas recientes del usuario. */
+function countOpenUnpaid(rows) {
+    return (Array.isArray(rows) ? rows : []).filter(
+        (o) => o && o.paymentMethod === 'online' && o.status === 'pending' && (o.paymentStatus || 'pending') === 'pending'
+    ).length;
+}
+
 /** Distancia en km (haversine) entre dos puntos {latitude, longitude}. */
 function distanceKm(a, b) {
     const R = 6371;
@@ -175,8 +198,8 @@ function validatePhone(raw) {
     return { ok: true, phone };
 }
 
-const ACTIVE_DELIVERY = ['preparing', 'on_the_way'];
-const ASSIGNABLE = ['pending', 'confirmed', 'preparing', 'on_the_way'];
+const ACTIVE_DELIVERY = ['preparing', 'ready', 'picked_up', 'on_the_way', 'delivery_failed'];
+const ASSIGNABLE = ['pending', 'confirmed', 'preparing', 'ready', 'picked_up', 'on_the_way', 'delivery_failed'];
 const TERMINAL = ['delivered', 'cancelled'];
 
 /** Un pedido solo puede (re)asignarse a un repartidor mientras no sea final. */
@@ -201,6 +224,7 @@ function toStaffOrderView(order, items = []) {
         paymentStatus: order.paymentStatus || null,
         driverUserId: order.driverUserId || null,
         driverName: order.driverName || null,
+        driverResponse: order.driverUserId ? (order.driverResponse || 'accepted') : null,
         items: items.map((i) => ({ name: i.name, quantity: i.quantity }))
     };
 }
@@ -285,8 +309,10 @@ const PAYMENT_STATUSES = ['not_required', 'pending', 'paid', 'failed', 'cancelle
  */
 const PAYMENT_TRANSITIONS = {
     not_required: [],
-    pending: ['paid', 'failed', 'cancelled'],
-    failed: ['paid', 'cancelled'],
+    // pending/failed -> refunded: un charge.refunded que llega ANTES que el "pagado" (eventos fuera de orden) debe
+    // dejar el pedido reembolsado; el "pagado" tardio ya no puede revertirlo (refunded no sale).
+    pending: ['paid', 'failed', 'cancelled', 'refunded'],
+    failed: ['paid', 'cancelled', 'refunded'],
     paid: ['refunded'],
     cancelled: ['refunded'], // pago tardio sobre un pedido ya cancelado: se reembolsa solo
     refunded: []
@@ -450,6 +476,9 @@ const isStripeCheckoutUrl = (url) => {
 const STATUS_MESSAGES = {
     confirmed: ['Pedido confirmado', 'El restaurante confirmó tu pedido.'],
     preparing: ['Preparando tu pedido', 'Estamos preparando tus alimentos.'],
+    picked_up: ['Tu pedido fue recogido', 'El repartidor ya tiene tu pedido.'],
+    ready: ['Tu pedido está listo', 'Ya está listo para que el repartidor lo recoja.'],
+    delivery_failed: ['No pudimos entregar tu pedido', 'El restaurante se pondrá en contacto contigo.'],
     on_the_way: ['¡Tu pedido va en camino!', 'Puedes seguir al repartidor en el mapa.'],
     delivered: ['Pedido entregado', 'Buen provecho.'],
     cancelled: ['Pedido cancelado', 'Tu pedido fue cancelado.']
@@ -494,10 +523,337 @@ function buildPushRequest(accountId, message) {
     return { title: String(message.title).slice(0, 100), body: String(message.body || '').slice(0, 250), users: [accountId], data };
 }
 
+// ====================================================================
+// Inventario, administracion y reportes (v8)
+// ====================================================================
+
+const ROLE_LABELS = ['admin', 'staff', 'driver'];
+const DEFAULT_LOW_STOCK = 5;
+
+/** Existencias de un producto: entero >= 0 si se controlan; null si el producto no controla inventario. */
+function stockOf(menuRow) {
+    const s = menuRow && menuRow.stock;
+    if (typeof s !== 'number' || !Number.isInteger(s)) return null;
+    // Un valor negativo es un estado inconsistente: se trata como agotado, NUNCA como "sin control" (ventas ilimitadas).
+    return s < 0 ? 0 : s;
+}
+
+/** Suma cantidades por producto (el mismo producto puede aparecer en varias lineas con extras distintos). */
+function totalsByMenu(lines) {
+    const out = {};
+    for (const l of lines || []) out[l.menuId] = (out[l.menuId] || 0) + Number(l.quantity || 0);
+    return out;
+}
+
+/** Comprueba existencias contra lo leido del servidor. Productos sin control de stock siempre alcanzan. */
+function checkStock(lines, menuById) {
+    const totals = totalsByMenu(lines);
+    for (const [menuId, qty] of Object.entries(totals)) {
+        const menu = menuById[menuId];
+        const stock = stockOf(menu);
+        if (stock !== null && stock < qty) {
+            return { ok: false, code: 'insufficient_stock', error: `No hay suficientes existencias de “${menu.name}” (quedan ${stock}).`, menuId, available: stock };
+        }
+    }
+    return { ok: true, totals };
+}
+
+/** Clave unica (idempotencia) de un movimiento de inventario: `r` reserva, `x` devolucion. */
+const moveKey = (kind, orderId, menuId) => `${kind === 'reserve' ? 'r' : 'x'}:${orderId}:${menuId}`;
+
+const isLowStock = (stock, threshold = DEFAULT_LOW_STOCK) => typeof stock === 'number' && stock <= threshold;
+
+/** Campos de producto que el administrador puede escribir (lista blanca; nada mas se acepta). */
+function validateProductInput(input, { partial = false } = {}) {
+    if (!input || typeof input !== 'object') return { ok: false, code: 'bad_request', error: 'Datos del producto inválidos.' };
+    const out = {};
+    const bad = (field, error) => ({ ok: false, code: 'bad_product', error, field });
+    const has = (k) => input[k] !== undefined;
+    if (!partial || has('name')) {
+        const name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
+        if (name.length < 2 || name.length > 80) return bad('name', 'El nombre debe tener entre 2 y 80 caracteres.');
+        out.name = name;
+    }
+    if (!partial || has('price')) {
+        const price = Number(input.price);
+        if (!Number.isFinite(price) || price <= 0 || price > 100000 || Math.round(price * 100) !== price * 100 && Math.abs(Math.round(price * 100) - price * 100) > 1e-6) {
+            return bad('price', 'El precio debe ser mayor que 0 y tener máximo 2 decimales.');
+        }
+        out.price = Math.round(price * 100) / 100;
+    }
+    if (has('description')) {
+        if (typeof input.description !== 'string' || input.description.length > 500) return bad('description', 'La descripción es muy larga (máximo 500).');
+        out.description = input.description.trim();
+    }
+    if (has('image_url')) {
+        const url = input.image_url;
+        if (typeof url !== 'string' || url.length > 500 || !/^https:\/\/[^\s]+$/i.test(url)) return bad('image_url', 'La imagen debe ser un enlace https.');
+        out.image_url = url;
+    }
+    for (const f of ['calories', 'protein']) {
+        if (has(f)) {
+            const n = Number(input[f]);
+            if (!Number.isFinite(n) || n < 0 || n > 100000) return bad(f, `${f} inválido.`);
+            out[f] = n;
+        }
+    }
+    if (has('rating')) {
+        const n = Number(input.rating);
+        if (!Number.isFinite(n) || n < 0 || n > 5) return bad('rating', 'La calificación va de 0 a 5.');
+        out.rating = n;
+    }
+    if (has('type')) {
+        if (typeof input.type !== 'string' || input.type.length > 40) return bad('type', 'Tipo inválido.');
+        out.type = input.type.trim();
+    }
+    if (has('categories')) {
+        if (typeof input.categories !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(input.categories)) return bad('categories', 'Categoría inválida.');
+        out.categories = input.categories;
+    }
+    if (has('available')) {
+        if (typeof input.available !== 'boolean') return bad('available', 'Disponibilidad inválida.');
+        out.available = input.available;
+    }
+    if (has('stock')) {
+        // null/"" => dejar de controlar inventario
+        if (input.stock === null || input.stock === '') out.stock = null;
+        else {
+            const n = Number(input.stock);
+            if (!Number.isInteger(n) || n < 0 || n > 1000000) return bad('stock', 'Las existencias deben ser un entero entre 0 y 1,000,000.');
+            out.stock = n;
+        }
+    }
+    return { ok: true, data: out };
+}
+
+/** Ajuste manual de existencias: o un nuevo total (`set`) o una variacion (`delta`), nunca bajo 0. */
+function planStockAdjust(current, { set, delta }) {
+    const cur = typeof current === 'number' ? current : 0;
+    let next;
+    if (set !== undefined) next = Number(set);
+    else if (delta !== undefined) next = cur + Number(delta);
+    else return { ok: false, code: 'bad_request', error: 'Indica "set" o "delta".' };
+    if (!Number.isInteger(next) || next < 0 || next > 1000000) return { ok: false, code: 'bad_stock', error: 'Existencias inválidas (entero entre 0 y 1,000,000).' };
+    return { ok: true, next, delta: next - cur };
+}
+
+/** Cambio de roles: solo etiquetas conocidas; el administrador no puede quitarse su propio acceso. */
+function validateRoleChange({ actorId, targetId, labels, targetCurrent = [] }) {
+    if (!Array.isArray(labels) || labels.some((l) => !ROLE_LABELS.includes(l)) || new Set(labels).size !== labels.length) {
+        return { ok: false, code: 'bad_roles', error: 'Roles inválidos.' };
+    }
+    if (actorId === targetId && targetCurrent.includes('admin') && !labels.includes('admin')) {
+        return { ok: false, code: 'self_demote', error: 'No puedes quitarte a ti mismo el rol de administrador.' };
+    }
+    // Se conservan etiquetas ajenas a la app (otras que el proyecto use) sin tocarlas.
+    const foreign = targetCurrent.filter((l) => !ROLE_LABELS.includes(l));
+    return { ok: true, labels: [...labels, ...foreign] };
+}
+
+const cents = (n) => Math.round((Number(n) + Number.EPSILON) * 100);
+
+/**
+ * Indicadores a partir de pedidos reales. "Ventas" = pedidos entregados; los pagos en linea
+ * reembolsados o cancelados no cuentan. Nada se estima: solo se suma lo recibido.
+ */
+function aggregateReport(orders, itemsByOrder = {}) {
+    const byStatus = {};
+    let salesCents = 0, delivered = 0, cancelled = 0, refundedCents = 0;
+    const products = {};
+    const perDay = {};
+    for (const o of orders || []) {
+        if (!o) continue;
+        byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+        if (o.status === 'delivered') {
+            delivered++;
+            salesCents += cents(o.total);
+            const day = String(o.$createdAt || '').slice(0, 10);
+            if (day) perDay[day] = (perDay[day] || 0) + cents(o.total);
+            for (const it of itemsByOrder[o.$id] || []) {
+                const k = it.menuId || it.name;
+                const p = (products[k] ||= { menuId: it.menuId || null, name: it.name, quantity: 0, salesCents: 0 });
+                p.quantity += Number(it.quantity || 0);
+                p.salesCents += cents(it.price) * Number(it.quantity || 0);
+            }
+        }
+        if (o.status === 'cancelled') cancelled++;
+        if (o.paymentStatus === 'refunded') refundedCents += cents(o.total);
+    }
+    const total = (orders || []).length;
+    const top = Object.values(products).sort((a, b) => b.quantity - a.quantity || b.salesCents - a.salesCents).slice(0, 10)
+        .map((p) => ({ menuId: p.menuId, name: p.name, quantity: p.quantity, sales: p.salesCents / 100 }));
+    return {
+        orders: total, delivered, cancelled, byStatus,
+        sales: salesCents / 100,
+        averageTicket: delivered ? Math.round(salesCents / delivered) / 100 : 0,
+        cancellationRate: total ? Math.round((cancelled / total) * 1000) / 10 : 0,
+        refunded: refundedCents / 100,
+        topProducts: top,
+        salesByDay: Object.keys(perDay).sort().map((d) => ({ day: d, sales: perDay[d] / 100 }))
+    };
+}
+
+/** CSV seguro: comillas dobles escapadas y proteccion contra formulas (=,+,-,@) al abrirlo en una hoja de calculo. */
+function toCsv(rows, columns) {
+    const esc = (v) => {
+        let s = v === null || v === undefined ? '' : String(v);
+        if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    return [columns.join(','), ...(rows || []).map((r) => columns.map((c) => esc(r[c])).join(','))].join('\n');
+}
+
+/** Elige el repartidor para asignacion automatica: disponible, sin exceso de entregas y con menos carga. */
+function pickDriver(candidates, { maxActive = 3 } = {}) {
+    const ok = (candidates || []).filter((d) => d && d.available === true && d.active < maxActive);
+    ok.sort((a, b) => a.active - b.active || String(a.id).localeCompare(String(b.id)));
+    return ok[0] || null;
+}
+
+// ---- Notificaciones v8
+function buildLowStockNotification(name, stock) {
+    return { title: 'Existencias bajas', body: `Quedan ${stock} de “${String(name).slice(0, 60)}”.`, data: { type: 'low_stock' } };
+}
+function buildDriverRejectedNotification(orderId, driverName) {
+    return { title: 'Repartidor rechazó el pedido', body: `${String(driverName || 'El repartidor').slice(0, 40)} rechazó el pedido #${String(orderId).slice(-6)}. Asigna otro.`, data: { type: 'driver_rejected', orderId } };
+}
+
+/**
+ * Inventario con inyeccion de dependencias (la misma logica corre en las Functions y en las pruebas).
+ *
+ * Reglas de negocio:
+ *  - RESERVA al crear el pedido (efectivo o en linea): el stock se descuenta de inmediato para que dos clientes
+ *    no compren la ultima unidad. Un pedido en linea sin pagar mantiene la reserva hasta que se paga o vence/cancela.
+ *  - LIBERACION (devuelve el stock) cuando el pedido se cancela (incluye reembolso, que siempre implica cancelar)
+ *    o cuando la sesion de pago vence sin cobro. Entregar o fallar la entrega NO devuelve stock.
+ *  - Idempotencia: cada movimiento usa un rowId determinista (hash de "r|x:pedido:producto"). Appwrite rechaza
+ *    un rowId repetido con 409, por lo que reservar o liberar dos veces el mismo pedido es imposible.
+ *  - Atomicidad: se usa decrementRowColumn/incrementRowColumn del servidor (operacion atomica con minimo 0),
+ *    no leer-modificar-escribir, asi que las compras simultaneas no pueden dejar el stock negativo.
+ */
+function makeInventory({ db, DB, MENU, MOVES, Query, hash }) {
+    const rowIdFor = (kind, orderId, menuId) => 'm' + hash(moveKey(kind, orderId, menuId)).slice(0, 32);
+    const isConflict = (e) => e && (e.code === 409 || /already exists|409/i.test(String(e.message || '')));
+    const enabled = !!MOVES;
+
+    /**
+     * Descuento atomico del servidor. NO se usa el parametro `min`: la documentacion de Appwrite no dice si un
+     * limite violado rechaza la operacion o la recorta, y recortar vendería unidades que no existen. En su lugar se
+     * lee el valor resultante que devuelve la propia operacion: si es negativo hubo sobreventa y se compensa al
+     * instante. Si la columna tiene minimo 0 y el servidor rechaza (400/409), tambien cuenta como sin existencias.
+     * Errores de red o 5xx se propagan (nunca se interpretan como "sin stock").
+     */
+    async function decrement(menuId, qty) {
+        let row;
+        try {
+            row = await db.decrementRowColumn({ databaseId: DB, tableId: MENU, rowId: menuId, column: 'stock', value: qty });
+        } catch (e) {
+            if (e && (e.code === 400 || e.code === 409)) return { ok: false, reason: 'rejected' };
+            throw e;
+        }
+        let after = row && typeof row.stock === 'number' ? row.stock : null;
+        if (after === null) {
+            // Respaldo si el SDK no devuelve la fila: lectura posterior (ya no es atomica; solo para no ignorar la sobreventa).
+            const fresh = await db.getRow({ databaseId: DB, tableId: MENU, rowId: menuId });
+            if (typeof fresh.stock !== 'number') throw new Error('stock_unreadable');
+            after = fresh.stock;
+        }
+        if (after < 0) {
+            await db.incrementRowColumn({ databaseId: DB, tableId: MENU, rowId: menuId, column: 'stock', value: qty });
+            return { ok: false, reason: 'oversold' };
+        }
+        return { ok: true, after };
+    }
+
+    async function increment(menuId, qty) {
+        const row = await db.incrementRowColumn({ databaseId: DB, tableId: MENU, rowId: menuId, column: 'stock', value: qty });
+        return row && typeof row.stock === 'number' ? row.stock : null;
+    }
+
+    async function release(orderId, reason = 'order_cancelled') {
+        if (!enabled) return { released: [] };
+        const reserved = (await db.listRows({ databaseId: DB, tableId: MOVES, queries: [Query.equal('orderId', orderId), Query.equal('type', ['reserve']), Query.limit(100)] })).rows;
+        const released = [];
+        for (const m of reserved) {
+            const rowId = rowIdFor('release', orderId, m.menuId);
+            try {
+                // Primero se registra la devolucion (clave unica): si ya existe, otro intento ya la hizo.
+                await db.createRow({ databaseId: DB, tableId: MOVES, rowId, data: { orderId, menuId: m.menuId, type: 'release', quantity: m.quantity, delta: m.quantity, reason } });
+            } catch (e) {
+                if (isConflict(e)) continue;
+                throw e;
+            }
+            try {
+                await increment(m.menuId, m.quantity);
+                released.push(m.menuId);
+            } catch (e) {
+                // Sin devolver el stock no se deja constancia: el siguiente intento (o la reconciliacion) lo reintenta.
+                await db.deleteRow({ databaseId: DB, tableId: MOVES, rowId }).catch(() => {});
+                throw e;
+            }
+        }
+        return { released };
+    }
+
+    /**
+     * Reserva todas las lineas o ninguna. Si algo falla a mitad, se devuelve lo ya descontado con `release`
+     * (que deja la huella necesaria); si incluso eso falla, la reserva queda registrada SIN devolucion y la
+     * reconciliacion de administracion la encuentra (reserva cuyo pedido no existe o esta cancelado).
+     */
+    async function reserve({ orderId, totals, menuById }) {
+        if (!enabled) return { ok: true, reserved: [], low: [] };
+        const reserved = [];
+        const low = [];
+        const rollback = async () => {
+            try {
+                await release(orderId, 'reserve_rollback');
+            } catch {
+                /* queda para la reconciliacion */
+            }
+        };
+        for (const [menuId, qty] of Object.entries(totals)) {
+            const menu = menuById[menuId];
+            if (stockOf(menu) === null) continue; // producto sin control de inventario
+            const rowId = rowIdFor('reserve', orderId, menuId);
+            const prior = await db.getRow({ databaseId: DB, tableId: MOVES, rowId }).catch(() => null);
+            if (prior) { reserved.push(menuId); continue; } // reintento: ya reservado
+            let dec;
+            try {
+                dec = await decrement(menuId, qty);
+            } catch (e) {
+                await rollback();
+                throw e;
+            }
+            if (!dec.ok) {
+                await rollback();
+                return { ok: false, code: 'insufficient_stock', error: `No hay suficientes existencias de “${menu.name}”.`, menuId };
+            }
+            try {
+                await db.createRow({ databaseId: DB, tableId: MOVES, rowId, data: { orderId, menuId, type: 'reserve', quantity: qty, delta: -qty, reason: 'order_created' } });
+            } catch (e) {
+                // Sin constancia no se conserva el descuento.
+                let leaked = false;
+                try { await increment(menuId, qty); } catch { leaked = true; }
+                if (isConflict(e) && !leaked) { reserved.push(menuId); continue; } // otra copia del mismo intento ya registro la reserva
+                await rollback();
+                throw Object.assign(new Error(`${leaked ? 'inventory_leak ' : ''}reserve_record_failed`), { leak: leaked ? { menuId, qty } : null });
+            }
+            reserved.push(menuId);
+            const threshold = Number.isInteger(menu.lowStockThreshold) ? menu.lowStockThreshold : DEFAULT_LOW_STOCK;
+            if (dec.after <= threshold && dec.after + qty > threshold) low.push({ menuId, name: menu.name, stock: dec.after });
+        }
+        return { ok: true, reserved, low };
+    }
+
+    return { enabled, reserve, release, decrement, increment, rowIdFor };
+}
+
 module.exports = {
     TRANSITIONS, ACTIVE_DELIVERY, ASSIGNABLE, TERMINAL,
     canActorTransition, priceOrder, validateDriverPosition,
-    validateAddressInput, validatePhone, distanceKm, checkCoverage, canAssignDriver, toStaffOrderView,
+    validateAddressInput, validatePhone, distanceKm, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID,
+    ROLE_LABELS, DEFAULT_LOW_STOCK, stockOf, totalsByMenu, checkStock, moveKey, isLowStock, validateProductInput, planStockAdjust,
+    validateRoleChange, aggregateReport, toCsv, pickDriver, makeInventory, buildLowStockNotification, buildDriverRejectedNotification, canAssignDriver, toStaffOrderView,
     checkExpected, parseDateRange, matchesOrderQuery, buildOrderEvent, isMenuAvailable,
     PAYMENT_METHODS, PAYMENT_STATUSES, PAYMENT_TRANSITIONS, CURRENCY, validatePaymentMethod, movePaymentStatus,
     buildCheckoutSessionParams, formEncode, checkSessionPayment, paymentIntentId,
