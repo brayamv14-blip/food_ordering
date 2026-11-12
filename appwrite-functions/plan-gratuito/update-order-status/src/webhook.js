@@ -61,10 +61,10 @@ export default async ({ req, res, log, error }) => {
     const db = new TablesDB(client);
     const messaging = new Messaging(client);
 
-    const record = async (order, type, from, to) => {
+    const record = async (order, type, from, to, note = null) => {
         if (!EVENTS) return;
         try {
-            await db.createRow({ databaseId: DB, tableId: EVENTS, rowId: ID.unique(), data: buildOrderEvent({ orderId: order.$id, type, from, to, actorId: 'stripe', actorRole: 'system' }) });
+            await db.createRow({ databaseId: DB, tableId: EVENTS, rowId: ID.unique(), data: buildOrderEvent({ orderId: order.$id, type, from, to, actorId: 'stripe', actorRole: 'system', note }) });
         } catch (e) {
             error(`event_failed: ${e.message}`);
         }
@@ -141,6 +141,16 @@ export default async ({ req, res, log, error }) => {
                 await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { paymentStatus: 'failed' } });
                 await record(order, 'payment_failed', order.status, order.status);
                 await notify(order.userId, buildPaymentNotification('failed', order.$id));
+            }
+            return reply(res, 200, { received: true });
+        }
+
+        if (change.kind === 'partial_refund') {
+            // Reembolso parcial hecho fuera de la app (panel de Stripe): solo se sincroniza el importe; el pago sigue "paid".
+            const refundedAmount = Math.round(Number(change.charge.amount_refunded)) / 100;
+            if (current === 'paid' && refundedAmount > Number(order.refundedAmount || 0) && refundedAmount < Number(order.total)) {
+                await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: order.$id, data: { refundedAmount } });
+                await record(order, 'payment_refunded', order.status, order.status, `parcial: ${refundedAmount}`);
             }
             return reply(res, 200, { received: true });
         }

@@ -75,3 +75,23 @@ describe("admin.service", () => {
         expect(today.to).toBe(now.toISOString());
     });
 });
+
+describe("v11: dashboard, categorías, clientes, auditoría", () => {
+    it("usa las acciones del servidor y tolera respuestas vacías", async () => {
+        const a = require("@/lib/services/admin.service");
+        mockCall.mockResolvedValue({ category: { id: "c1", name: "X" } });
+        expect(await a.saveCategory({ name: "X" })).toEqual({ id: "c1", name: "X" });
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "saveCategory", category: { name: "X" } });
+        await a.deleteCategory("c1");
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "deleteCategory", categoryId: "c1" });
+        mockCall.mockResolvedValue(null);
+        expect(await a.listCustomers()).toEqual([]);
+        expect(await a.listAudit()).toEqual({ enabled: false, entries: [] });
+        await a.setUserActive("u1", false);
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "setUserStatus", userId: "u1", active: false });
+        await a.getCustomerOrders("u1");
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "customerOrders", customerId: "u1" });
+        await a.getCustomerOrders("u1", true);
+        expect(mockCall).toHaveBeenLastCalledWith("fnAdmin", { action: "customerOrders", customerId: "u1", includeAddresses: true });
+    });
+});

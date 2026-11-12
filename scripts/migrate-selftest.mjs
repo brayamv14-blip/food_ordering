@@ -24,6 +24,7 @@ console.log('aplicar -> operaciones:', calls.length, '| tabla historial creada s
 const before = calls.length;
 await run(db, {apply:true, rollback:false, log:quiet});
 console.log('v8 -> stock/umbral/driverResponse/movimientos:', ['n:stock','n:lowStockThreshold','s:driverResponse','b:stockReserved=false','T+inventory_movements[]'].every((x)=>calls.includes(x)));
+console.log('v11 -> receivedAt/refundedAmount/note/categorías.active/auditoría:', ['d:receivedAt','f:refundedAmount','s:note','b:active=true','T+audit_log[]'].every((x)=>calls.includes(x)));
 console.log('segunda aplicación (idempotente) -> nuevas:', calls.length-before);
 await run(db, {apply:true, rollback:true, log:quiet});
 console.log('rollback -> tabla historial existe:', tables.has('order_events'), '| columnas restantes:', Object.values(cols).flat().length, '| índices:', Object.values(idx).flat().length);

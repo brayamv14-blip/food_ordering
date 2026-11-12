@@ -33,9 +33,23 @@ export interface ProductInput {
     stock?: number | null;
 }
 
-export interface AdminCategory { id: string; name: string }
+export interface AdminCategory { id: string; name: string; description?: string; active?: boolean }
 export interface AdminUser { id: string; name: string; email: string | null; labels: string[] }
-export interface AdminPayment { orderId: string; total: number; paymentStatus: string; orderStatus: string; reference: string | null; at: string }
+export interface AdminPayment { orderId: string; total: number; paymentMethod?: string; paymentStatus: string; orderStatus: string; refundedAmount?: number; reference: string | null; at: string }
+export interface AdminCustomer { id: string; name: string; email: string | null; active: boolean; createdAt: string | null }
+export interface CustomerOrder { id: string; status: string; total: number; paymentMethod: string; paymentStatus: string | null; createdAt: string }
+export interface AuditEntry { id: string; action: string; actorId: string; actorRole: string | null; targetType: string | null; targetId: string | null; summary: string; at: string }
+export interface DashboardData {
+    orders: number; delivered: number; cancelled: number; sales: number; averageTicket: number; cancellationRate: number; refunded: number;
+    todayOrders: number; discounts: number; deliveryFees: number; partialRefunds: number; unpaidOnlineOrders: number;
+    revenueByMethod: { cash: number; online: number };
+    pipeline: { pending: number; accepted: number; preparing: number; onTheWay: number; delivered: number };
+    topProducts: { menuId: string; name: string; quantity: number; sales: number }[];
+    salesByDay: { day: string; sales: number }[]; salesByWeek: { day: string; sales: number }[]; salesByMonth: { day: string; sales: number }[];
+    paymentCounts: Record<string, number>;
+    drivers: { driverUserId: string; name: string; delivered: number; failed: number; cancelled: number; active: number }[];
+}
+export interface DriversSummary { total: number; available: number; busy: number; offline: number }
 export interface StockMovement { id: string; menuId: string; orderId: string; type: string; delta: number; reason: string | null; at: string }
 
 export interface SalesReport {
@@ -99,7 +113,7 @@ export async function setUserRoles(userId: string, labels: string[]): Promise<st
     return (await call<{ labels: string[] }>("setRole", { userId, labels })).labels;
 }
 
-export async function listPayments(filters: { paymentStatus?: string; from?: string; to?: string } = {}): Promise<AdminPayment[]> {
+export async function listPayments(filters: { paymentStatus?: string; paymentMethod?: "online" | "cash_on_delivery"; from?: string; to?: string } = {}): Promise<AdminPayment[]> {
     const clean = Object.fromEntries(Object.entries(filters).filter(([, v]) => !!v));
     const r = await call<{ payments?: AdminPayment[] }>("listPayments", clean);
     return Array.isArray(r?.payments) ? r.payments : [];
@@ -108,6 +122,37 @@ export async function listPayments(filters: { paymentStatus?: string; from?: str
 export async function getReport(range: { from?: string; to?: string } = {}, csv = false): Promise<{ report: SalesReport; truncated: boolean; csv?: string }> {
     const clean = Object.fromEntries(Object.entries(range).filter(([, v]) => !!v));
     return call("report", { ...clean, ...(csv ? { format: "csv" } : {}) });
+}
+
+export async function getDashboard(range: { from?: string; to?: string } = {}): Promise<{ dashboard: DashboardData; driversSummary: DriversSummary; truncated: boolean }> {
+    const clean = Object.fromEntries(Object.entries(range).filter(([, v]) => !!v));
+    return call("dashboard", clean);
+}
+
+export async function saveCategory(category: { name?: string; description?: string; active?: boolean }, categoryId?: string): Promise<AdminCategory> {
+    return (await call<{ category: AdminCategory }>("saveCategory", { category, ...(categoryId ? { categoryId } : {}) })).category;
+}
+export async function setCategoryActive(categoryId: string, active: boolean): Promise<AdminCategory> {
+    return (await call<{ category: AdminCategory }>("setCategoryActive", { categoryId, active })).category;
+}
+export async function deleteCategory(categoryId: string): Promise<void> {
+    await call("deleteCategory", { categoryId });
+}
+
+export async function listCustomers(query?: string): Promise<AdminCustomer[]> {
+    const r = await call<{ customers?: AdminCustomer[] }>("listCustomers", query ? { query } : {});
+    return Array.isArray(r?.customers) ? r.customers : [];
+}
+/** Las direcciones son datos personales: solo se piden si hace falta y queda registro en la auditoria. */
+export async function getCustomerOrders(customerId: string, includeAddresses = false): Promise<{ orders: CustomerOrder[]; spent: number; addresses?: string[] }> {
+    return call("customerOrders", { customerId, ...(includeAddresses ? { includeAddresses: true } : {}) });
+}
+export async function setUserActive(userId: string, active: boolean): Promise<void> {
+    await call("setUserStatus", { userId, active });
+}
+export async function listAudit(): Promise<{ enabled: boolean; entries: AuditEntry[] }> {
+    const r = await call<{ enabled?: boolean; entries?: AuditEntry[] }>("listAudit");
+    return { enabled: !!r?.enabled, entries: Array.isArray(r?.entries) ? r.entries : [] };
 }
 
 /** Periodos predefinidos para reportes (inicio del dia en hora local). */

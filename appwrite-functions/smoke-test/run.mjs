@@ -1,6 +1,6 @@
 import { store } from 'node-appwrite';
 import { createHmac } from 'node:crypto';
-for (const [k, v] of Object.entries({ DATABASE_ID: 'db', ORDERS_TABLE_ID: 'orders', ORDER_ITEMS_TABLE_ID: 'items', MENU_TABLE_ID: 'menu', INVENTORY_MOVES_TABLE_ID: 'moves', CATEGORIES_TABLE_ID: 'cats', AUTO_ASSIGN_DRIVER: 'false', CUSTOMIZATIONS_TABLE_ID: 'cust', MENU_CUSTOMIZATIONS_TABLE_ID: 'rel', ORDER_EVENTS_TABLE_ID: 'events', STRIPE_SECRET_KEY: 'sk_test_no_real_0000', STRIPE_WEBHOOK_SECRET: 'whsec_test_no_real', PAYMENT_RETURN_URL: 'https://equipo.github.io/delivery/pago.html' })) process.env[k] = v;
+for (const [k, v] of Object.entries({ DATABASE_ID: 'db', ORDERS_TABLE_ID: 'orders', ORDER_ITEMS_TABLE_ID: 'items', MENU_TABLE_ID: 'menu', INVENTORY_MOVES_TABLE_ID: 'moves', CATEGORIES_TABLE_ID: 'cats', AUDIT_TABLE_ID: 'audit', AUTO_ASSIGN_DRIVER: 'false', CUSTOMIZATIONS_TABLE_ID: 'cust', MENU_CUSTOMIZATIONS_TABLE_ID: 'rel', ORDER_EVENTS_TABLE_ID: 'events', STRIPE_SECRET_KEY: 'sk_test_no_real_0000', STRIPE_WEBHOOK_SECRET: 'whsec_test_no_real', PAYMENT_RETURN_URL: 'https://equipo.github.io/delivery/pago.html' })) process.env[k] = v;
 
 // ---- doble de fetch: API de Stripe (no hay red real). Respeta la clave de idempotencia como el servicio real.
 const net = { calls: [], stripe: { sessions: {}, byKey: {}, refunds: {}, refundKeys: {}, createOk: true, refundOk: true, seq: 0 } };
@@ -29,7 +29,11 @@ globalThis.fetch = async (url, opts = {}) => {
     if (!S.refundOk) return json({ error: {} }, false, 500);
     const key = opts.headers['Idempotency-Key'];
     if (key && S.refundKeys[key]) return json(S.refundKeys[key]);
-    const refund = { id: 're_' + (++S.seq), status: 'succeeded', payment_intent: form.get('payment_intent') };
+    const piId = form.get('payment_intent'); const sess = Object.values(S.sessions).find((x) => x.payment_intent === piId);
+    const amount = form.get('amount') ? Number(form.get('amount')) : (sess ? sess.amount_total : 0);
+    const already = Object.values(S.refunds).filter((x) => x.payment_intent === piId).reduce((a, x) => a + x.amount, 0);
+    if (sess && already + amount > sess.amount_total) return json({ error: { message: 'exceeds' } }, false, 400);
+    const refund = { id: 're_' + (++S.seq), status: 'succeeded', payment_intent: piId, amount };
     S.refunds[refund.id] = refund; if (key) S.refundKeys[key] = refund; return json(refund);
   }
   throw new Error('Llamada a Stripe inesperada ' + opts.method + ' ' + url);
@@ -85,7 +89,7 @@ const o1 = store.orders[0]; const oid = o1.$id;
 r = await ops(mk('u2', { orderId: oid, status: 'cancelled' })); check('otro cliente -> 404', r.s === 404, r);
 r = await ops(mk('u1', { orderId: oid, status: 'delivered' })); check('cliente no puede marcar entregado', r.s >= 400 && o1.status === 'pending', r);
 r = await ops(mk('staff1', { orderId: oid, status: 'confirmed', expectedStatus: 'pending', expectedUpdatedAt: o1.$updatedAt })); check('staff confirma con datos vigentes', r.s === 200 && o1.status === 'confirmed', r);
-r = await ops(mk('staff2', { orderId: oid, status: 'cancelled', expectedStatus: 'pending' })); check('segundo empleado con datos viejos -> 409 stale_order', r.s === 409 && r.b.code === 'stale_order' && o1.status === 'confirmed', r);
+r = await ops(mk('staff2', { orderId: oid, status: 'cancelled', reason: 'prueba', expectedStatus: 'pending' })); check('segundo empleado con datos viejos -> 409 stale_order', r.s === 409 && r.b.code === 'stale_order' && o1.status === 'confirmed', r);
 r = await ops(mk('staff2', { orderId: oid, status: 'preparing', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })); check('fecha de actualización vieja -> 409', r.s === 409 && r.b.code === 'stale_order', r);
 r = await ops(mk('u1', { orderId: oid, status: 'cancelled' })); check('cliente ya no cancela tras confirmar', r.s === 403 && o1.status === 'confirmed', r);
 r = await ops(mk('staff1', { orderId: oid, status: 'preparing' })); check('staff -> preparing', r.s === 200);
@@ -134,7 +138,7 @@ r = await ops(mk('drv2', { orderId: oid, status: 'delivered' })); check('entrega
 check('al terminar no se conserva ubicación', o1.driverLatitude === null);
 r = await ops(mk('drv2', { action: 'updateLocation', orderId: oid, latitude: 19.5, longitude: -99.2 })); check('pedido entregado ya no acepta ubicación -> 409', r.s === 409, r);
 r = await ops(mk('staff1', { action: 'assignDriver', orderId: oid, driverUserId: 'drv1' })); check('pedido terminado no se reasigna -> 409', r.s === 409, r);
-r = await ops(mk('staff1', { orderId: oid, status: 'cancelled' })); check('entregado no se cancela', r.s === 409, r);
+r = await ops(mk('staff1', { orderId: oid, status: 'cancelled', reason: 'prueba' })); check('entregado no se cancela', r.s === 409, r);
 
 // ---------- historial
 r = await ops(mk('staff1', { action: 'orderHistory', orderId: oid })); const types = r.b.events?.map((e) => e.type + ':' + (e.to ?? ''));
@@ -249,17 +253,17 @@ r = await hook(hk(completed({ $id: 'inexistente' }, s5))); check('pedido inexist
 
 // ---------- reembolsos: cancelar un pedido pagado
 store.pushes.length = 0;
-r = await ops(mk('staff1', { orderId: o5.$id, status: 'cancelled' })); const refundsAfterFirst = Object.keys(net.stripe.refunds).length;
+r = await ops(mk('staff1', { orderId: o5.$id, status: 'cancelled', reason: 'prueba' })); const refundsAfterFirst = Object.keys(net.stripe.refunds).length;
 check('el personal cancela un pedido pagado: se reembolsa y se cancela', r.s === 200 && o5.status === 'cancelled' && o5.paymentStatus === 'refunded' && refundsAfterFirst === 1, [r, o5.paymentStatus]);
 check('reembolso con clave de idempotencia ligada al pedido', net.calls.filter((c) => c.url.endsWith('/v1/refunds')).every((c) => c.opts.headers['Idempotency-Key'] === `refund-${o5.$id}`));
 check('el cliente recibe cancelación y reembolso (sin duplicados)', pushes().map((p) => p.title).join('|') === 'Pedido cancelado|Reembolso emitido', pushes().map((p) => p.title));
-r = await ops(mk('staff1', { orderId: o5.$id, status: 'cancelled' })); check('cancelar otra vez no reembolsa de nuevo', Object.keys(net.stripe.refunds).length === 1 && r.s >= 400, r);
+r = await ops(mk('staff1', { orderId: o5.$id, status: 'cancelled', reason: 'prueba' })); check('cancelar otra vez no reembolsa de nuevo', Object.keys(net.stripe.refunds).length === 1 && r.s >= 400, r);
 r = await hook(hk({ id: 'evt_r', type: 'charge.refunded', data: { object: { id: 'ch_1', amount: 1450, amount_refunded: 1450, refunded: true, metadata: { orderId: o5.$id } } } })); check('webhook charge.refunded sobre pedido ya reembolsado es idempotente', r.s === 200 && o5.paymentStatus === 'refunded' && pushes().length === 2, pushes().map((p) => p.title));
 { // si el reembolso falla, el pedido NO se cancela
   r = await createOrder(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] }))); const o7 = store.orders.find((o) => o.$id === r.b.orderId); const s7 = net.stripe.sessions[o7.stripeSessionId];
   payInStripe(s7.id, { amount: 1450 }); await hook(hk(completed(o7, s7)));
   net.stripe.refundOk = false;
-  r = await ops(mk('staff1', { orderId: o7.$id, status: 'cancelled' })); check('si Stripe rechaza el reembolso, el pedido NO se cancela (502)', r.s === 502 && r.b.code === 'refund_failed' && o7.status === 'pending' && o7.paymentStatus === 'paid', r);
+  r = await ops(mk('staff1', { orderId: o7.$id, status: 'cancelled', reason: 'prueba' })); check('si Stripe rechaza el reembolso, el pedido NO se cancela (502)', r.s === 502 && r.b.code === 'refund_failed' && o7.status === 'pending' && o7.paymentStatus === 'paid', r);
   net.stripe.refundOk = true;
   // pago tardío en un pedido ya cancelado
   r = await createOrder(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] }))); const o8 = store.orders.find((o) => o.$id === r.b.orderId); const s8 = net.stripe.sessions[o8.stripeSessionId];
@@ -320,7 +324,7 @@ check('el cliente recibe aviso de entrega fallida', pushes().at(-1)?.title === '
 r = await ops(mk('drv1', { orderId: o11.$id, status: 'delivered' })); check('de fallida no se pasa a entregado -> 409', r.s === 409 && o11.status === 'delivery_failed', r);
 r = await ops(mk('drv1', { orderId: o11.$id, status: 'cancelled' })); check('el repartidor no cancela una entrega fallida', r.s === 403, r);
 r = await ops(mk('u1', { orderId: o11.$id, status: 'cancelled' })); check('el cliente no cancela una entrega fallida', r.s === 403, r);
-r = await ops(mk('staff1', { orderId: o11.$id, status: 'cancelled' })); check('el personal cancela la entrega fallida', r.s === 200 && o11.status === 'cancelled', r);
+r = await ops(mk('staff1', { orderId: o11.$id, status: 'cancelled', reason: 'prueba' })); check('el personal cancela la entrega fallida', r.s === 200 && o11.status === 'cancelled', r);
 r = await ops(mk('drv1', { action: 'updateLocation', orderId: o11.$id, latitude: 19.5, longitude: -99.2 })); check('no se acepta ubicación en pedido cancelado/fallido -> 409', r.s === 409, r);
 
 // tope de pedidos en línea sin pagar
@@ -356,13 +360,13 @@ r = await createOrder(mk('u1', other({ items: [{ menuId: 'inv2', quantity: 40 }]
 r = await buy('u1', 1, { clientRequestId: iA.clientRequestId }); check('inventario: reintento del mismo intento no vuelve a descontar', r.b.duplicate === true && stock() === 0, [r.b, stock()]);
 // cancelar devuelve; repetir no duplica
 r = await ops(mk('u1', { orderId: iA.$id, status: 'cancelled' })); check('inventario: cancelar devuelve las existencias (0+3)', r.s === 200 && stock() === 3, [r.s, stock()]);
-r = await ops(mk('staff1', { orderId: iA.$id, status: 'cancelled' })); check('inventario: cancelar dos veces no devuelve dos veces', stock() === 3, stock());
+r = await ops(mk('staff1', { orderId: iA.$id, status: 'cancelled', reason: 'prueba' })); check('inventario: cancelar dos veces no devuelve dos veces', stock() === 3, stock());
 check('inventario: movimiento "release" único', store.moves.filter((m) => m.orderId === iA.$id && m.type === 'release').length === 1, store.moves);
 // falla al devolver: no deja constancia y se puede reintentar
 r = await buy('u1', 1); const iB = store.orders.find((o) => o.$id === r.b.orderId);
-store.failIncrement = true; r = await ops(mk('staff1', { orderId: iB.$id, status: 'cancelled' })); store.failIncrement = false;
+store.failIncrement = true; r = await ops(mk('staff1', { orderId: iB.$id, status: 'cancelled', reason: 'prueba' })); store.failIncrement = false;
 check('inventario: si la devolución falla, el pedido igual se cancela y no queda release', r.s === 200 && stock() === 2 && !store.moves.some((m) => m.orderId === iB.$id && m.type === 'release'), [r.s, stock()]);
-r = await ops(mk('staff1', { orderId: iB.$id, status: 'cancelled' })); check('inventario: cancelado ya no se puede cancelar de nuevo (409)', r.s === 409, r);
+r = await ops(mk('staff1', { orderId: iB.$id, status: 'cancelled', reason: 'prueba' })); check('inventario: cancelado ya no se puede cancelar de nuevo (409)', r.s === 409, r);
 // reembolso (pedido en linea pagado) => cancelar devuelve stock una vez
 store.menu.find((m) => m.$id === 'inv1').stock = 4; store.moves.length = 0;
 r = await buy('u1', 2, { paymentMethod: 'online' }); const iC = store.orders.find((o) => o.$id === r.b.orderId);
@@ -373,7 +377,7 @@ const sendHook = (event) => { const raw = JSON.stringify(event); return hook({ r
 const sess = (id) => net.stripe.sessions[id];
 r = await sendHook({ type: 'checkout.session.completed', data: { object: sess(iC.stripeSessionId) } }); check('pago: webhook marca pagado', iC.paymentStatus === 'paid', [r, iC.paymentStatus]);
 r = await sendHook({ type: 'checkout.session.completed', data: { object: sess(iC.stripeSessionId) } }); check('pago: webhook repetido es idempotente', r.s === 200 && stock() === 2, [r, stock()]);
-r = await ops(mk('staff1', { orderId: iC.$id, status: 'cancelled' })); check('reembolso + cancelación devuelve stock una sola vez', r.s === 200 && iC.paymentStatus === 'refunded' && stock() === 4, [r, stock(), iC.paymentStatus]);
+r = await ops(mk('staff1', { orderId: iC.$id, status: 'cancelled', reason: 'prueba' })); check('reembolso + cancelación devuelve stock una sola vez', r.s === 200 && iC.paymentStatus === 'refunded' && stock() === 4, [r, stock(), iC.paymentStatus]);
 // sesion vencida => se cancela y libera
 r = await buy('u2', 3, { paymentMethod: 'online' }); const iD = store.orders.find((o) => o.$id === r.b.orderId);
 check('sesión vencida: reserva previa', stock() === 1, stock());
@@ -533,7 +537,7 @@ check('...y la copia perdedora devolvió su reserva (historial neto = 1 unidad)'
 r9 = await mkOrder('u2', [{ menuId: 'v9a', quantity: 2 }]); const c1 = orderRow(r9);
 check('pedido guarda stockReserved=true', c1.stockReserved === true && stockOf('v9a') === 0, [c1.stockReserved, stockOf('v9a')]);
 store.failIncrement = true;
-r9 = await ops(mk('staff1', { orderId: c1.$id, status: 'cancelled' }));
+r9 = await ops(mk('staff1', { orderId: c1.$id, status: 'cancelled', reason: 'prueba' }));
 store.failIncrement = false;
 check('devolución fallida al cancelar: 200 con stockRelease=pending y evento de aviso', r9.s === 200 && r9.b.stockRelease === 'pending' && c1.status === 'cancelled' && stockOf('v9a') === 0 && store.events.some((e) => e.orderId === c1.$id && e.type === 'stock_release_failed'), [r9, stockOf('v9a')]);
 r9 = await admin(mk('adm9', { action: 'reconcileInventory' })); check('la reconciliación devuelve el stock del pedido cancelado', r9.b.releasedOrders === 1 && stockOf('v9a') === 2, [r9, stockOf('v9a')]);
@@ -544,9 +548,9 @@ process.env.INVENTORY_MOVES_TABLE_ID = '';
 const opsNoInv = (await import('./update-order-status/src/main.js?sininventario')).default;
 const hookNoInv = (await import('./stripe-webhook/src/main.js?sininventario')).default;
 process.env.INVENTORY_MOVES_TABLE_ID = 'moves';
-r9 = await opsNoInv(mk('staff1', { orderId: c2.$id, status: 'cancelled' }));
+r9 = await opsNoInv(mk('staff1', { orderId: c2.$id, status: 'cancelled', reason: 'prueba' }));
 check('sin INVENTORY_MOVES_TABLE_ID no se cancela un pedido con stock reservado (503) y nada cambia', r9.s === 503 && r9.b.code === 'inventory_unavailable' && c2.status === 'pending' && stockOf('v9a') === 1, [r9, c2.status]);
-r9 = await ops(mk('staff1', { orderId: c2.$id, status: 'cancelled' })); check('con la configuración correcta sí se cancela y devuelve', r9.s === 200 && stockOf('v9a') === 2, [r9, stockOf('v9a')]);
+r9 = await ops(mk('staff1', { orderId: c2.$id, status: 'cancelled', reason: 'prueba' })); check('con la configuración correcta sí se cancela y devuelve', r9.s === 200 && stockOf('v9a') === 2, [r9, stockOf('v9a')]);
 
 // ---- entrega fallida / reintento / cancelacion: devuelve una sola vez
 r9 = await mkOrder('u1', [{ menuId: 'v9b', quantity: 2 }]); const f1 = orderRow(r9);
@@ -558,14 +562,14 @@ check('fallar la entrega NO devuelve stock', stockOf('v9b') === 2, stockOf('v9b'
 r9 = await ops(mk('drv2', { orderId: f1.$id, status: 'on_the_way' })); check('reintento de entrega no mueve stock', r9.s === 200 && stockOf('v9b') === 2, [r9, stockOf('v9b')]);
 await ops(mk('drv2', { orderId: f1.$id, status: 'delivery_failed' }));
 r9 = await ops(mk('drv2', { orderId: f1.$id, status: 'cancelled' })); check('el repartidor no cancela', r9.s >= 400 && f1.status === 'delivery_failed', r9);
-r9 = await ops(mk('staff1', { orderId: f1.$id, status: 'cancelled' })); check('el personal cancela tras el fallo: devuelve una vez', r9.s === 200 && stockOf('v9b') === 4, [r9, stockOf('v9b')]);
-r9 = await ops(mk('staff1', { orderId: f1.$id, status: 'cancelled' })); check('cancelar otra vez es 409 y no devuelve de nuevo', r9.s === 409 && stockOf('v9b') === 4, [r9, stockOf('v9b')]);
+r9 = await ops(mk('staff1', { orderId: f1.$id, status: 'cancelled', reason: 'prueba' })); check('el personal cancela tras el fallo: devuelve una vez', r9.s === 200 && stockOf('v9b') === 4, [r9, stockOf('v9b')]);
+r9 = await ops(mk('staff1', { orderId: f1.$id, status: 'cancelled', reason: 'prueba' })); check('cancelar otra vez es 409 y no devuelve de nuevo', r9.s === 409 && stockOf('v9b') === 4, [r9, stockOf('v9b')]);
 r9 = await mkOrder('u1', [{ menuId: 'v9b', quantity: 1 }]); const f2 = orderRow(r9);
 for (const s of ['confirmed', 'preparing']) await ops(mk('staff1', { orderId: f2.$id, status: s }));
 await ops(mk('staff1', { action: 'assignDriver', orderId: f2.$id, driverUserId: 'drv2' })); await accept('drv2', f2.$id);
 await ops(mk('drv2', { orderId: f2.$id, status: 'on_the_way' })); await ops(mk('drv2', { orderId: f2.$id, status: 'delivered' }));
 check('entregar no devuelve stock', f2.status === 'delivered' && stockOf('v9b') === 3, stockOf('v9b'));
-r9 = await ops(mk('staff1', { orderId: f2.$id, status: 'cancelled' })); check('un pedido entregado no se cancela (sin devolución)', r9.s === 409 && stockOf('v9b') === 3, r9);
+r9 = await ops(mk('staff1', { orderId: f2.$id, status: 'cancelled', reason: 'prueba' })); check('un pedido entregado no se cancela (sin devolución)', r9.s === 409 && stockOf('v9b') === 3, r9);
 
 // ---- Stripe: eventos fuera de orden, duplicados y pago tardio
 r9 = await mkOrder('u1', [{ menuId: 'v9b', quantity: 1 }], { paymentMethod: 'online' }); const s1 = orderRow(r9);
@@ -681,6 +685,294 @@ q = await ops(mk('staff1', { action: 'listOrders' }));
 check('v10: listOrders (personal) incluye ubicación del repartidor solo si hay repartidor', q.s === 200 && q.b.orders.every((o) => (o.driverUserId ? true : o.driverLatitude === null)), q.b.orders && q.b.orders.length);
 q = await ops(mk('u1', { action: 'listOrders' }));
 check('v10: cliente sigue sin listar pedidos -> 403', q.s === 403, q);
+}
+
+// ---- v11: repartidores (estados, reclamo atomico), entrega, reembolsos y administracion
+{
+const admin = (await import('./admin-api/src/main.js')).default;
+store.prefs = {}; store.status = {};
+store.labels.drv3 = ['driver']; store.names.drv3 = 'Marta';
+store.menu.push({ $id: 'v11inv', name: 'Stock11', price: 9, stock: 6, lowStockThreshold: 1 });
+const newOrder = async (o = {}) => { const x = await createOrder(mk('u1', other({ items: [{ menuId: 'm1', quantity: 1 }], ...o }))); return store.orders.find((q) => q.$id === x.b.orderId); };
+const st = (id, status, extra = {}, who = 'staff1') => ops(mk(who, { orderId: id, status, ...extra }));
+const free = () => store.orders.forEach((o) => { if (['drv1', 'drv2', 'drv3'].includes(o.driverUserId) && !['delivered', 'cancelled'].includes(o.status)) o.status = 'cancelled'; });
+const toReady = async (id) => { for (const s of ['confirmed', 'preparing', 'ready']) { const x = await st(id, s); if (x.s !== 200) return x; } return { s: 200 }; };
+let r;
+
+// --- estados del repartidor: desconectado / disponible / ocupado
+r = await ops(mk('staff1', { action: 'listDrivers' }));
+check('v11: repartidor sin actividad = disponible', r.b.drivers.find((d) => d.id === 'drv1').status === 'available', r.b);
+r = await ops(mk('drv1', { action: 'setAvailability', available: false }));
+r = await ops(mk('staff1', { action: 'listDrivers' }));
+let d1 = r.b.drivers.find((d) => d.id === 'drv1');
+check('v11: al desconectarse pasa a offline y queda registrada su última señal', d1.status === 'offline' && d1.available === false && !!d1.lastSeenAt, d1);
+const pool1 = await newOrder(); await toReady(pool1.$id);
+r = await ops(mk('drv1', { action: 'availableOrders' }));
+check('v11: un repartidor desconectado no recibe pedidos disponibles', r.s === 200 && r.b.offline === true && r.b.orders.length === 0, r);
+r = await ops(mk('drv1', { action: 'claimOrder', orderId: pool1.$id }));
+check('v11: desconectado no puede reclamar (409 driver_offline)', r.s === 409 && r.b.code === 'driver_offline' && !pool1.driverUserId, r);
+await ops(mk('drv1', { action: 'setAvailability', available: true }));
+
+// --- pedidos disponibles: privacidad y permisos
+r = await ops(mk('drv1', { action: 'availableOrders' }));
+const view = r.b.orders.find((o) => o.id === pool1.$id);
+check('v11: pedidos disponibles se listan', r.s === 200 && !!view, r);
+check('v11: la lista de disponibles NO expone nombre, teléfono ni dirección del cliente', view && !JSON.stringify(view).match(/FALSO|5512|Reforma|customer|contact|address/i) && view.itemsCount === 1, view);
+r = await ops(mk('u1', { action: 'availableOrders' })); check('v11: cliente no ve pedidos disponibles (403)', r.s === 403, r);
+r = await ops(mk('staff1', { action: 'availableOrders' })); check('v11: personal usa listOrders, no la bolsa del repartidor (403)', r.s === 403, r);
+const pend = await newOrder();
+r = await ops(mk('drv1', { action: 'availableOrders' })); check('v11: un pedido pendiente (sin confirmar) no aparece', !r.b.orders.some((o) => o.id === pend.$id), r.b);
+r = await ops(mk('drv1', { action: 'claimOrder', orderId: pend.$id })); check('v11: no se reclama un pedido sin confirmar (409 not_available)', r.s === 409 && r.b.code === 'not_available', r);
+
+// --- dos repartidores reclaman el mismo pedido a la vez (varias repeticiones)
+free(); let oneWinner = true, evOk = true; const dbgRounds = [];
+for (let i = 0; i < 5; i++) {
+  const o = await newOrder(); await toReady(o.$id);
+  const [a, b] = await Promise.all([ops(mk('drv1', { action: 'claimOrder', orderId: o.$id })), ops(mk('drv2', { action: 'claimOrder', orderId: o.$id }))]);
+  const wins = [a, b].filter((x) => x.s === 200).length, losses = [a, b].filter((x) => x.s === 409 && x.b.code === 'already_taken').length;
+  const winner = a.s === 200 ? 'drv1' : 'drv2';
+  if (!(wins === 1 && losses === 1 && o.driverUserId === winner && o.driverResponse === 'accepted')) { oneWinner = false; dbgRounds.push([a.s, a.b.code, b.s, b.b.code, o.driverUserId]); }
+  if (store.events.filter((e) => e.orderId === o.$id && e.type === 'driver_claimed').length !== 1) evOk = false;
+  free();
+}
+check('v11: dos repartidores reclamando a la vez -> uno gana (200) y otro 409 already_taken (5 rondas)', oneWinner, dbgRounds);
+check('v11: queda un solo evento driver_claimed por pedido (quién aceptó)', evOk);
+{
+  free();
+  const o = await newOrder(); await toReady(o.$id);
+  r = await ops(mk('drv1', { action: 'claimOrder', orderId: o.$id }));
+  const again = await ops(mk('drv1', { action: 'claimOrder', orderId: o.$id }));
+  check('v11: el mismo repartidor repitiendo el reclamo es idempotente', r.s === 200 && again.s === 200 && again.b.duplicate === true);
+  const other2 = await ops(mk('drv2', { action: 'claimOrder', orderId: o.$id })); check('v11: otro repartidor después -> 409', other2.s === 409 && other2.b.code === 'already_taken', other2);
+  r = await ops(mk('staff1', { action: 'assignDriver', orderId: o.$id, driverUserId: 'drv2' }));
+  check('v11: el personal puede reasignar un pedido ya aceptado', r.s === 200 && o.driverUserId === 'drv2' && o.driverResponse === 'pending', [r, o.driverUserId]);
+  r = await ops(mk('drv2', { action: 'respondAssignment', orderId: o.$id, accept: false, reason: 'Se me ponchó la llanta' }));
+  check('v11: al rechazar, el pedido vuelve a la bolsa y queda el motivo', r.s === 200 && !o.driverUserId && store.events.some((e) => e.orderId === o.$id && e.type === 'driver_rejected' && /llanta/.test(e.note || '')), [r, o.driverUserId]);
+  r = await ops(mk('drv3', { action: 'claimOrder', orderId: o.$id })); check('v11: otro repartidor lo toma tras el rechazo', r.s === 200 && o.driverUserId === 'drv3', r);
+}
+// tope de entregas activas
+{
+  const mine = []; for (let i = 0; i < 4; i++) { const o = await newOrder(); await toReady(o.$id); mine.push(o); }
+  store.orders.filter((o) => o.driverUserId === 'drv3' && !['delivered', 'cancelled'].includes(o.status)).forEach((o) => { o.driverUserId = null; });
+  const res4 = []; for (const o of mine) res4.push((await ops(mk('drv3', { action: 'claimOrder', orderId: o.$id }))).s);
+  check('v11: el repartidor no pasa del máximo de entregas activas (3 sí, la 4.ª 409)', res4.join() === '200,200,200,409', res4);
+  mine.forEach((o) => { o.driverUserId = null; });
+}
+
+// --- cancelar después de asignarse, con motivo
+{
+  const o = await newOrder({ items: [{ menuId: 'v11inv', quantity: 2 }] }); await st(o.$id, 'confirmed');
+  const stockBefore = store.menu.find((m) => m.$id === 'v11inv').stock - 0 + 2; // ya descontado al crear
+  r = await ops(mk('drv2', { action: 'claimOrder', orderId: o.$id }));
+  store.pushes.length = 0;
+  r = await st(o.$id, 'cancelled'); check('v11: el personal debe indicar motivo al cancelar (400)', r.s === 400 && r.b.code === 'reason_required' && o.status === 'confirmed', r);
+  r = await st(o.$id, 'cancelled', { reason: 'x' }); check('v11: motivo demasiado corto (400)', r.s === 400, r);
+  r = await st(o.$id, 'cancelled', { reason: 'Cliente no respondió al teléfono' });
+  check('v11: cancelación con motivo -> 200 y se guarda en el historial', r.s === 200 && o.status === 'cancelled' && store.events.some((e) => e.orderId === o.$id && e.toStatus === 'cancelled' && /no respondió/.test(e.note || '')), r);
+  check('v11: se avisa al repartidor asignado de la cancelación', store.pushes.some((p) => /cancelado/i.test(p.title || '') && JSON.stringify(p).includes('drv2')), store.pushes.map((p) => p.title));
+  check('v11: el stock del pedido cancelado vuelve una sola vez', store.menu.find((m) => m.$id === 'v11inv').stock === stockBefore, [store.menu.find((m) => m.$id === 'v11inv').stock, stockBefore]);
+  r = await st(o.$id, 'cancelled', { reason: 'otra vez' }); check('v11: cancelar de nuevo -> 409 y sin segunda devolución', r.s === 409 && store.moves.filter((m) => m.orderId === o.$id && m.type === 'release').length === 1, r);
+  r = await ops(mk('drv3', { action: 'claimOrder', orderId: o.$id })); check('v11: no se reclama un pedido cancelado', r.s === 409, r);
+  r = await ops(mk('u1', { orderId: o.$id, status: 'cancelled', reason: 'x' })); check('v11: el cliente tampoco cancela uno ya cancelado', r.s === 409 || r.s === 403, r);
+}
+
+// --- entrega: recogida implícita, protección y confirmación del cliente
+{
+  const o = await newOrder(); await toReady(o.$id);
+  r = await st(o.$id, 'delivered'); check('v11: no se entrega un pedido que no fue recogido/en camino (409)', r.s === 409 && o.status === 'ready', r);
+  await ops(mk('drv1', { action: 'claimOrder', orderId: o.$id }));
+  r = await st(o.$id, 'delivered', {}, 'drv1'); check('v11: el repartidor tampoco puede entregar desde "listo" (409)', r.s === 409, r);
+  r = await st(o.$id, 'on_the_way', {}, 'drv1'); check('v11: el repartidor sale a reparto', r.s === 200 && o.status === 'on_the_way', r);
+  check('v11: queda constancia de la recogida (picked_up) con el repartidor como autor', store.events.some((e) => e.orderId === o.$id && e.toStatus === 'picked_up' && e.actorId === 'drv1'), store.events.filter((e) => e.orderId === o.$id).map((e) => e.toStatus));
+  r = await ops(mk('u1', { action: 'confirmReceipt', orderId: o.$id })); check('v11: no se confirma recepción antes de la entrega (409)', r.s === 409 && r.b.code === 'not_delivered', r);
+  r = await ops(mk('drv2', { orderId: o.$id, status: 'delivered' })); check('v11: repartidor ajeno no marca entregado (403)', r.s === 403 && o.status === 'on_the_way', r);
+  r = await st(o.$id, 'delivered', {}, 'drv1'); check('v11: entrega confirmada por el repartidor', r.s === 200 && o.status === 'delivered', r);
+  check('v11: se sabe quién entregó (evento con actor)', store.events.some((e) => e.orderId === o.$id && e.toStatus === 'delivered' && e.actorId === 'drv1' && e.driverUserId === 'drv1'));
+  r = await ops(mk('u2', { action: 'confirmReceipt', orderId: o.$id })); check('v11: otro cliente no confirma recepción ajena (404)', r.s === 404 && !o.receivedAt, r);
+  r = await ops(mk('staff1', { action: 'confirmReceipt', orderId: o.$id })); check('v11: el personal no confirma en nombre del cliente (404)', r.s === 404 && !o.receivedAt, r);
+  r = await ops(mk('u1', { action: 'confirmReceipt', orderId: o.$id })); check('v11: el cliente confirma la recepción', r.s === 200 && !!o.receivedAt && store.events.some((e) => e.orderId === o.$id && e.type === 'received' && e.actorRole === 'customer'), r);
+  const at = o.receivedAt; r = await ops(mk('u1', { action: 'confirmReceipt', orderId: o.$id })); check('v11: confirmar dos veces es idempotente', r.s === 200 && r.b.duplicate === true && o.receivedAt === at, r);
+  store.pushes.length = 0;
+  r = await ops(mk('u1', { action: 'reportIssue', orderId: o.$id, reason: 'Faltó una bebida' })); check('v11: el cliente reporta un problema (y se avisa al personal)', r.s === 200 && r.b.reported === true && store.events.some((e) => e.orderId === o.$id && e.type === 'customer_issue'), r);
+  r = await ops(mk('u1', { action: 'reportIssue', orderId: o.$id, reason: 'Faltó una bebida' })); check('v11: el mismo problema no se registra dos veces', r.s === 200 && r.b.duplicate === true && store.events.filter((e) => e.orderId === o.$id && e.type === 'customer_issue').length === 1, r);
+  r = await ops(mk('u2', { action: 'reportIssue', orderId: o.$id, reason: 'Faltó una bebida' })); check('v11: no se reporta un pedido ajeno (404)', r.s === 404, r);
+  r = await ops(mk('u1', { action: 'reportIssue', orderId: o.$id, reason: '' })); check('v11: el reporte exige motivo (400)', r.s === 400, r);
+  r = await ops(mk('u1', { action: 'reportIssue', orderId: pend.$id, reason: 'todavia no llega' })); check('v11: no se reporta un pedido que aún no sale (409)', r.s === 409, r);
+}
+
+// --- repartidor pierde conexión durante la entrega: el personal lo cierra con motivo y se puede reintentar
+{
+  const o = await newOrder(); await toReady(o.$id);
+  await ops(mk('drv1', { action: 'claimOrder', orderId: o.$id })); await st(o.$id, 'on_the_way', {}, 'drv1');
+  await ops(mk('drv1', { action: 'updateLocation', orderId: o.$id, latitude: 19.51, longitude: -99.21 }));
+  r = await ops(mk('staff1', { action: 'driversMap' }));
+  const pt = r.b.orders.find((x) => x.id === o.$id);
+  check('v11: el mapa del personal muestra la última ubicación del repartidor y su hora', r.s === 200 && pt && pt.driverLatitude === 19.51 && !!pt.driverUpdatedAt, pt);
+  check('v11: el mapa lista al repartidor en tránsito como ocupado', r.b.drivers.find((d) => d.id === 'drv1').status === 'busy', r.b.drivers);
+  store.prefs.drv1 = { ...(store.prefs.drv1 || {}), driverLastSeenAt: new Date(Date.now() - 20 * 60 * 1000).toISOString() };
+  r = await ops(mk('staff1', { action: 'listDrivers' })); const d = r.b.drivers.find((x) => x.id === 'drv1');
+  check('v11: sin señal reciente se marca connected=false (informativo)', d.connected === false, d);
+  r = await st(o.$id, 'delivery_failed', { reason: 'El repartidor perdió conexión y el cliente no contesta' });
+  check('v11: el personal reporta entrega no realizada con motivo', r.s === 200 && o.status === 'delivery_failed' && store.events.some((e) => e.orderId === o.$id && e.toStatus === 'delivery_failed' && /perdió conexión/.test(e.note || '')), r);
+  r = await st(o.$id, 'on_the_way', {}, 'drv1'); check('v11: el repartidor puede reintentar la entrega', r.s === 200 && o.status === 'on_the_way', r);
+  r = await ops(mk('drv2', { orderId: o.$id, status: 'delivered' })); check('v11: un repartidor ajeno sigue sin poder cerrar el pedido (403)', r.s === 403, r);
+}
+// asignación automática: ignora desconectados y sin señal vencida
+{
+  store.prefs = { drv1: { driverLastSeenAt: new Date(Date.now() - 30 * 60 * 1000).toISOString() }, drv2: { driverAvailable: false }, drv3: { driverLastSeenAt: new Date().toISOString() } };
+  free();
+  const o = await newOrder(); await st(o.$id, 'confirmed');
+  process.env.AUTO_ASSIGN_DRIVER = 'true'; const opsAuto11 = (await import('./update-order-status/src/main.js?auto11')).default; process.env.AUTO_ASSIGN_DRIVER = 'false';
+  r = await opsAuto11(mk('staff1', { orderId: o.$id, status: 'preparing' }));
+  check('v11: la asignación automática elige solo al repartidor conectado y con señal reciente', r.s === 200 && o.driverUserId === 'drv3', [r.s, o.driverUserId]);
+  store.prefs = {};
+}
+
+// --- reembolsos totales y parciales (solo administrador)
+{
+  const op = await newOrder({ paymentMethod: 'online' }); const sp = net.stripe.sessions[op.stripeSessionId]; payInStripe(sp.id, { amount: Math.round(op.total * 100) });
+  r = await hook(hk(completed(op, sp))); check('v11: (preparación) pedido pagado por webhook', op.paymentStatus === 'paid', op.paymentStatus);
+  const total = op.total;
+  r = await ops(mk('staff1', { action: 'refundOrder', orderId: op.$id, amount: 1, reason: 'cortesía' })); check('v11: el personal no reembolsa (403)', r.s === 403, r);
+  r = await ops(mk('u1', { action: 'refundOrder', orderId: op.$id, reason: 'quiero mi dinero' })); check('v11: el cliente no reembolsa (403)', r.s === 403, r);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, amount: 5 })); check('v11: reembolso sin motivo -> 400', r.s === 400 && r.b.code === 'reason_required', r);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, amount: -3, reason: 'ajuste' })); check('v11: importe negativo -> 400', r.s === 400, r);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, amount: total + 1, reason: 'ajuste' })); check('v11: importe mayor al cobrado -> 422', r.s === 422 && r.b.code === 'amount_exceeds', r);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, amount: '5', reason: 'ajuste' })); check('v11: importe que no es número -> 400', r.s === 400, r);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, amount: 5, reason: 'Producto frío' }));
+  check('v11: reembolso parcial -> 200, sigue "paid" y acumula lo reembolsado', r.s === 200 && r.b.full === false && op.paymentStatus === 'paid' && op.refundedAmount === 5, [r, op.refundedAmount]);
+  check('v11: Stripe recibió exactamente 500 centavos', Object.values(net.stripe.refunds).filter((x) => x.payment_intent === 'pi_' + sp.id).map((x) => x.amount).join() === '500', net.stripe.refunds);
+  const nRef = Object.keys(net.stripe.refunds).length;
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, amount: total, reason: 'otra vez' })); check('v11: no se puede reembolsar más de lo que queda (422)', r.s === 422, r);
+  check('v11: el rechazo no emitió reembolso en Stripe', Object.keys(net.stripe.refunds).length === nRef);
+  // evento de Stripe del mismo reembolso parcial, dos veces: no cambia el estado ni duplica
+  const part = { id: 'evt_p1', type: 'charge.refunded', data: { object: { amount: Math.round(total * 100), amount_refunded: 800, metadata: { orderId: op.$id } } } };
+  r = await hook(hk(part)); await hook(hk(part));
+  check('v11: webhook de reembolso parcial sincroniza el importe (8) y no cambia el pago', r.s === 200 && op.refundedAmount === 8 && op.paymentStatus === 'paid', [op.refundedAmount, op.paymentStatus]);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, reason: 'devolver el resto' }));
+  check('v11: reembolsar el resto -> reembolso total y estado "refunded"', r.s === 200 && r.b.full === true && op.paymentStatus === 'refunded', r);
+  const sum = Object.values(net.stripe.refunds).filter((x) => x.payment_intent === 'pi_' + sp.id).reduce((a, x) => a + x.amount, 0);
+  check('v11: lo reembolsado en Stripe nunca supera lo cobrado', sum <= Math.round(total * 100) && sum > 0, [sum, total]);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: op.$id, reason: 'otra vez' })); check('v11: ya reembolsado -> 409', r.s === 409 && r.b.code === 'already_refunded', r);
+  r = await ops(mk('adm1', { action: 'refundOrder', orderId: (await newOrder()).$id, reason: 'efectivo' })); check('v11: pedido en efectivo no se reembolsa por Stripe (409)', r.s === 409 && r.b.code === 'not_online', r);
+  check('v11: el reembolso queda en el historial y en la auditoría', store.events.some((e) => e.orderId === op.$id && e.type === 'payment_refunded' && /parcial/.test(e.note || '')) && store.audit.some((a) => a.action === 'refund' && a.targetId === op.$id), store.audit);
+
+  // cancelar un pedido con reembolso parcial previo: solo se devuelve lo que falta
+  const oc = await newOrder({ paymentMethod: 'online' }); const sc = net.stripe.sessions[oc.stripeSessionId]; payInStripe(sc.id, { amount: Math.round(oc.total * 100) }); await hook(hk(completed(oc, sc)));
+  await ops(mk('adm1', { action: 'refundOrder', orderId: oc.$id, amount: 4, reason: 'cortesía' }));
+  r = await st(oc.$id, 'cancelled', { reason: 'Cliente cambió de opinión' });
+  const sumC = Object.values(net.stripe.refunds).filter((x) => x.payment_intent === 'pi_' + sc.id).reduce((a, x) => a + x.amount, 0);
+  check('v11: cancelar tras un reembolso parcial devuelve solo el resto (total = lo cobrado)', r.s === 200 && sumC === Math.round(oc.total * 100) && oc.paymentStatus === 'refunded' && oc.status === 'cancelled', [r, sumC, oc.total]);
+  const nR2 = Object.keys(net.stripe.refunds).length; await st(oc.$id, 'cancelled', { reason: 'otra vez' });
+  check('v11: cancelar de nuevo no reembolsa otra vez', Object.keys(net.stripe.refunds).length === nR2);
+}
+
+// --- administración: tablero, categorías, clientes, usuarios, auditoría
+{
+  const dOrd = await newOrder(); await toReady(dOrd.$id); await ops(mk('drv3', { action: 'claimOrder', orderId: dOrd.$id })); await st(dOrd.$id, 'on_the_way', {}, 'drv3'); await st(dOrd.$id, 'delivered', {}, 'drv3');
+  r = await admin(mk('staff1', { action: 'dashboard' })); check('v11: el tablero financiero no es para el personal (403)', r.s === 403, r);
+  r = await admin(mk('u1', { action: 'dashboard' })); check('v11: ni para clientes (403)', r.s === 403, r);
+  r = await admin(mk('adm1', { action: 'dashboard' }));
+  const db = r.b.dashboard;
+  check('v11: tablero del administrador (ventas, pipeline, métodos de pago, repartidores)', r.s === 200 && db.sales > 0 && db.revenueByMethod.cash > 0 && typeof db.pipeline.delivered === 'number' && Array.isArray(db.salesByWeek) && Array.isArray(db.salesByMonth) && r.b.driversSummary.total === 3, r.b);
+  const sumStatus = Object.values(db.byStatus).reduce((a, b) => a + b, 0);
+  check('v11: el tablero cuadra con los pedidos reales (suma por estado = total de pedidos)', sumStatus === store.orders.length, [sumStatus, store.orders.length]);
+  check('v11: rendimiento por repartidor incluye entregas de drv3', db.drivers.some((x) => x.driverUserId === 'drv3' && x.delivered >= 1), db.drivers);
+  r = await admin(mk('adm1', { action: 'dashboard', from: 'no-es-fecha' })); check('v11: fechas inválidas -> 400', r.s === 400, r);
+
+  r = await admin(mk('staff1', { action: 'saveCategory', category: { name: 'Postres' } })); check('v11: el personal no crea categorías (403)', r.s === 403, r);
+  r = await admin(mk('adm1', { action: 'saveCategory', category: { name: 'x' } })); check('v11: nombre de categoría inválido -> 422', r.s === 422, r);
+  r = await admin(mk('adm1', { action: 'saveCategory', category: { name: 'Postres', description: 'Dulces', isAdmin: true } })); const cat = r.b.category;
+  check('v11: el administrador crea una categoría', r.s === 200 && cat && cat.name === 'Postres' && !('isAdmin' in store.cats.at(-1)), r);
+  r = await admin(mk('adm1', { action: 'saveCategory', categoryId: cat.id, category: { name: 'Postres y más' } })); check('v11: edita una categoría', r.s === 200 && r.b.category.name === 'Postres y más', r);
+  r = await admin(mk('adm1', { action: 'setCategoryActive', categoryId: cat.id, active: false }));
+  r = await admin(mk('adm1', { action: 'listCategories' })); check('v11: desactivar una categoría se refleja en el listado', r.b.categories.find((c) => c.id === cat.id).active === false, r.b);
+  r = await admin(mk('adm1', { action: 'setCategoryActive', categoryId: cat.id, active: 'si' })); check('v11: estado de categoría inválido -> 400', r.s === 400, r);
+  r = await admin(mk('adm1', { action: 'saveProduct', product: { name: 'Pastel', price: 20, categories: cat.id } })); const pastel = r.b.product;
+  r = await admin(mk('adm1', { action: 'deleteCategory', categoryId: cat.id }));
+  check('v11: no se borra una categoría con productos (409)', r.s === 409 && r.b.code === 'category_in_use' && store.cats.some((c) => c.$id === cat.id), r);
+  await admin(mk('adm1', { action: 'saveProduct', productId: pastel.id, product: { categories: 'cat1' } }));
+  r = await admin(mk('staff1', { action: 'deleteCategory', categoryId: cat.id })); check('v11: el personal no borra categorías (403)', r.s === 403, r);
+  r = await admin(mk('adm1', { action: 'deleteCategory', categoryId: cat.id })); check('v11: se borra una categoría vacía', r.s === 200 && !store.cats.some((c) => c.$id === cat.id), r);
+
+  r = await admin(mk('staff1', { action: 'listCustomers' })); check('v11: el personal no consulta clientes (datos personales) (403)', r.s === 403, r);
+  r = await admin(mk('drv1', { action: 'customerOrders', customerId: 'u1' })); check('v11: un repartidor tampoco (403)', r.s === 403, r);
+  store.labels.u1 = []; store.labels.u2 = [];
+  r = await admin(mk('adm1', { action: 'listCustomers' }));
+  check('v11: lista de clientes sin personal ni repartidores', r.s === 200 && r.b.customers.some((c) => c.id === 'u1') && !r.b.customers.some((c) => ['staff1', 'drv1', 'adm1'].includes(c.id)), r.b);
+  check('v11: la lista de clientes no incluye contraseñas, preferencias ni etiquetas', !JSON.stringify(r.b).match(/prefs|labels|password/i), r.b);
+  const nAudit = store.audit.length;
+  r = await admin(mk('adm1', { action: 'customerOrders', customerId: 'u1' }));
+  check('v11: historial de pedidos de un cliente (sin direcciones por defecto)', r.s === 200 && r.b.orders.length > 0 && !('addresses' in r.b) && store.audit.length === nAudit, r.b);
+  r = await admin(mk('adm1', { action: 'customerOrders', customerId: 'u1', includeAddresses: true }));
+  check('v11: consultar direcciones queda auditado', r.s === 200 && Array.isArray(r.b.addresses) && store.audit.some((a) => a.action === 'customer_addresses_viewed' && a.targetId === 'u1'), [r.b, store.audit.at(-1)]);
+
+  r = await admin(mk('staff1', { action: 'setUserStatus', userId: 'u2', active: false })); check('v11: el personal no desactiva cuentas (403)', r.s === 403, r);
+  r = await admin(mk('adm1', { action: 'setUserStatus', userId: 'adm1', active: false })); check('v11: nadie se desactiva a sí mismo (409)', r.s === 409 && r.b.code === 'self_disable', r);
+  r = await admin(mk('adm1', { action: 'setUserStatus', userId: 'u2', active: 'no' })); check('v11: estado inválido -> 400', r.s === 400, r);
+  r = await admin(mk('adm1', { action: 'setUserStatus', userId: 'u2', active: false })); check('v11: el administrador desactiva una cuenta', r.s === 200 && store.status.u2 === false, r);
+  r = await admin(mk('adm1', { action: 'setUserStatus', userId: 'u2', active: true })); check('v11: y la reactiva', r.s === 200 && store.status.u2 === true, r);
+  r = await admin(mk('adm1', { action: 'setUserStatus', userId: 'adm2', active: false })); check('v11: puede desactivar a otro administrador si queda uno activo', r.s === 200, r);
+  r = await admin(mk('adm1', { action: 'setUserStatus', userId: 'adm2', active: true }));
+  for (const id of Object.keys(store.labels)) if (store.labels[id].includes('admin') && id !== 'adm1') store.status[id] = false; store.status.adm1 = true; // el resto de admins inactivos
+  r = await admin(mk('adm2', { action: 'setUserStatus', userId: 'adm1', active: false })); check('v11: no se desactiva al último administrador activo (409)', r.s === 409 && r.b.code === 'last_admin', r);
+  for (const id of Object.keys(store.labels)) if (store.labels[id].includes('admin')) store.status[id] = true;
+
+  r = await admin(mk('staff1', { action: 'listAudit' })); check('v11: la auditoría es solo del administrador (403)', r.s === 403, r);
+  r = await admin(mk('adm1', { action: 'listAudit' }));
+  check('v11: la auditoría registra acciones críticas (reembolso, categorías, estado de usuarios)', r.s === 200 && r.b.enabled && ['refund', 'category_create', 'user_status'].every((a) => r.b.entries.some((e) => e.action === a)), r.b.entries.map((e) => e.action));
+  check('v11: la auditoría no guarda datos personales (correos/teléfonos)', !JSON.stringify(r.b).match(/@ejemplo|5512/), r.b);
+
+  r = await ops(mk('staff1', { action: 'driverHistory', driverUserId: 'drv3' }));
+  check('v11: historial de entregas de un repartidor (con totales)', r.s === 200 && r.b.stats.delivered >= 1 && r.b.orders.every((o) => o.driverUserId === 'drv3'), r.b.stats);
+  r = await ops(mk('drv1', { action: 'driverHistory', driverUserId: 'drv3' })); check('v11: un repartidor no consulta el historial de otro (403)', r.s === 403, r);
+  r = await ops(mk('u1', { action: 'driversMap' })); check('v11: el mapa de repartidores no es para clientes (403)', r.s === 403, r);
+  r = await ops(mk('drv1', { action: 'driversMap' })); check('v11: ni para repartidores (403)', r.s === 403, r);
+  r = await admin(mk('adm1', { action: 'listPayments', paymentMethod: 'cash_on_delivery' })); check('v11: pagos en efectivo consultables por el administrador', r.s === 200 && r.b.payments.length > 0 && r.b.payments.every((p) => p.paymentMethod === 'cash_on_delivery'), r.b.payments?.length);
+}
+
+// --- el cliente sigue sin poder tocar precios, pagos, estados ni asignaciones
+{
+  const o = await newOrder();
+  for (const patch of [{ paymentStatus: 'paid' }, { total: 0.01 }, { status: 'delivered' }, { driverUserId: 'u1' }, { receivedAt: '2026-01-01' }, { refundedAmount: 99 }]) {
+    const c = await createOrder(mk('u1', other({ items: [{ menuId: 'm1', quantity: 1 }], ...patch })));
+    const row = store.orders.find((x) => x.$id === c.b.orderId);
+    if (!row || row.paymentStatus === 'paid' || row.total < 5 || row.status === 'delivered' || row.driverUserId || row.receivedAt || row.refundedAmount) check('v11: create-order ignora ' + Object.keys(patch)[0], false, row);
+  }
+  check('v11: create-order ignora campos de pago/estado/total/asignación enviados por el cliente', true);
+  r = await ops(mk('u1', { action: 'refundOrder', orderId: o.$id, reason: 'x y z' })); check('v11: cliente no usa refundOrder (403)', r.s === 403);
+  r = await ops(mk('u1', { action: 'claimOrder', orderId: o.$id })); check('v11: cliente no usa claimOrder (403)', r.s === 403);
+  r = await ops(mk('drv1', { action: 'confirmReceipt', orderId: o.$id })); check('v11: repartidor no confirma recepción (404)', r.s === 404);
+}
+}
+
+// ---------- v13.1: modo demostracion (simulacion, apagado por omision)
+{
+  r = await ops(mk('u1', { action: 'advanceDemo', orderId: 'x' })); check('demo: apagado por omisión -> 403 demo_disabled', r.s === 403 && r.b.code === 'demo_disabled', r);
+  Object.assign(process.env, { DEMO_AUTOPILOT: 'true', RESTAURANT_LATITUDE: '19.5', RESTAURANT_LONGITUDE: '-99.2' });
+  const opsDemo = (await import('./update-order-status/src/main.js?demo')).default;
+  r = await createOrder(mk('u1', other({ items: [{ menuId: 'm1', quantity: 1 }] }))); const dm = store.orders.find((o) => o.$id === r.b.orderId);
+  r = await opsDemo(mk('u2', { action: 'advanceDemo', orderId: dm.$id })); check('demo: otro cliente no avanza pedido ajeno (404)', r.s === 404, r);
+  r = await opsDemo(mk('drv1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: repartidor real no usa advanceDemo (403)', r.s === 403, r);
+  r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: pending -> confirmed de inmediato', r.s === 200 && r.b.advanced && dm.status === 'confirmed', r);
+  const back = (secs) => { const t = new Date(Date.now() - secs * 1000).toISOString(); dm.$createdAt = t; for (const e of store.events) if (e.orderId === dm.$id) e.$createdAt = t; };
+  back(0);
+  r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: antes de tiempo no avanza', r.s === 200 && r.b.advanced === false && dm.status === 'confirmed', r);
+  back(30); r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id }));
+  check('demo: confirmed -> preparing y se asigna repartidor ficticio', dm.status === 'preparing' && /^demo-driver-/.test(dm.driverUserId) && /demo/.test(dm.driverName) && typeof dm.driverLatitude === 'number', [dm.status, dm.driverUserId, dm.driverName]);
+  back(60); await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: preparing -> ready', dm.status === 'ready', dm.status);
+  back(60); await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: ready -> picked_up', dm.status === 'picked_up', dm.status);
+  back(60); await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: picked_up -> on_the_way', dm.status === 'on_the_way', dm.status);
+  back(45); await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id }));
+  check('demo: en camino el repartidor ficticio se mueve hacia el cliente', dm.status === 'on_the_way' && typeof dm.driverLatitude === 'number', [dm.status, dm.driverLatitude]);
+  back(200); r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: on_the_way -> delivered y se limpia la ubicación', dm.status === 'delivered' && dm.driverLatitude == null, [dm.status, dm.driverLatitude]);
+  r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dm.$id })); check('demo: pedido terminado -> done', r.s === 200 && r.b.done === true, r);
+  // pago en linea: no avanza hasta que Stripe confirme
+  r = await createOrder(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] }))); const dp = store.orders.find((o) => o.$id === r.b.orderId);
+  r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dp.$id })); check('demo: pago en línea sin pagar -> espera y sigue pending', r.s === 200 && r.b.waiting === 'payment' && dp.status === 'pending', r);
+  payInStripe(dp.stripeSessionId);
+  r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dp.$id })); check('demo: pagado en Stripe -> paid y confirmed', dp.paymentStatus === 'paid' && dp.status === 'confirmed', [dp.paymentStatus, dp.status]);
+  delete process.env.DEMO_AUTOPILOT; delete process.env.RESTAURANT_LATITUDE; delete process.env.RESTAURANT_LONGITUDE;
 }
 
 console.log(`\n${ok} ok, ${bad} fallas`); process.exit(bad ? 1 : 0);

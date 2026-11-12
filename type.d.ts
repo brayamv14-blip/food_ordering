@@ -146,4 +146,8 @@ export interface SignInParams {
 export interface GetMenuParams {
     category?: string;
     query?: string;
+    /** Maximo de productos a traer (por omision el catalogo completo). */
+    limit?: number;
+    /** Si es true, ordena del mas reciente al mas antiguo. */
+    newest?: boolean;
 }

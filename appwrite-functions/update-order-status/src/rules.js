@@ -152,6 +152,18 @@ function validateAddressInput(address) {
 /** Maximo de pedidos en linea sin pagar por usuario (evita abusar de sesiones de Stripe). */
 const MAX_OPEN_UNPAID = 5;
 
+/** Anti-abuso general: maximo de pedidos nuevos por usuario en una ventana de 10 minutos. */
+const MAX_ORDERS_PER_WINDOW = 8;
+const ORDER_WINDOW_MS = 10 * 60 * 1000;
+
+/** Cuenta los pedidos creados dentro de la ventana (filas con `$createdAt`). */
+function countRecentOrders(rows, now = Date.now(), windowMs = ORDER_WINDOW_MS) {
+    return (Array.isArray(rows) ? rows : []).filter((r) => {
+        const t = Date.parse(r && r.$createdAt);
+        return Number.isFinite(t) && now - t >= 0 && now - t <= windowMs;
+    }).length;
+}
+
 /** Cuenta los pedidos en linea pendientes de pago entre las filas recientes del usuario. */
 function countOpenUnpaid(rows) {
     return (Array.isArray(rows) ? rows : []).filter(
@@ -223,6 +235,8 @@ function toStaffOrderView(order, items = []) {
         deliveryLongitude: typeof order.deliveryLongitude === 'number' ? order.deliveryLongitude : null,
         paymentMethod: order.paymentMethod || 'cash_on_delivery',
         paymentStatus: order.paymentStatus || null,
+        refundedAmount: Number(order.refundedAmount) > 0 ? Number(order.refundedAmount) : 0,
+        receivedAt: order.receivedAt || null,
         driverUserId: order.driverUserId || null,
         driverName: order.driverName || null,
         driverResponse: order.driverUserId ? (order.driverResponse || 'accepted') : null,
@@ -270,7 +284,7 @@ function matchesOrderQuery(orderId, query) {
 }
 
 /** Evento de historial (auditoria) de un pedido. */
-function buildOrderEvent({ orderId, type, from = null, to = null, actorId, actorRole, driverUserId = null }) {
+function buildOrderEvent({ orderId, type, from = null, to = null, actorId, actorRole, driverUserId = null, note = null }) {
     return {
         orderId,
         type,
@@ -278,7 +292,9 @@ function buildOrderEvent({ orderId, type, from = null, to = null, actorId, actor
         toStatus: to,
         actorId,
         actorRole,
-        driverUserId
+        driverUserId,
+        // Motivo/comentario (opcional): solo se envia si existe, asi un despliegue sin la columna `note` sigue funcionando.
+        ...(typeof note === 'string' && note ? { note: note.slice(0, 200) } : {})
     };
 }
 
@@ -332,7 +348,11 @@ function movePaymentStatus(from, to) {
     return { ok: true, changed: true, status: to };
 }
 
-/** Parametros de la sesion de Stripe Checkout (pares clave/valor; el importe viene del servidor). */
+/**
+ * Parametros de la sesion de Stripe Checkout (pares clave/valor; el importe viene del servidor).
+ * NO se envia `payment_method_types`: las versiones recientes de la API de Stripe (2026-09-30 y posteriores) lo rechazan con 400.
+ * Los metodos de pago se administran en Dashboard > Configuracion > Metodos de pago (dejar activadas solo las tarjetas si se quiere solo tarjeta).
+ */
 function buildCheckoutSessionParams({ orderId, userId, total, returnUrl, now = Date.now(), currency = CURRENCY }) {
     const sep = String(returnUrl).includes('?') ? '&' : '?';
     const enc = encodeURIComponent(orderId);
@@ -341,7 +361,6 @@ function buildCheckoutSessionParams({ orderId, userId, total, returnUrl, now = D
         ['client_reference_id', orderId],
         ['success_url', `${returnUrl}${sep}result=success&order=${enc}`],
         ['cancel_url', `${returnUrl}${sep}result=cancelled&order=${enc}`],
-        ['payment_method_types[0]', 'card'],
         ['line_items[0][quantity]', '1'],
         ['line_items[0][price_data][currency]', currency],
         ['line_items[0][price_data][unit_amount]', String(toCents(total))],
@@ -427,7 +446,10 @@ function stripeEventToPayment(event) {
             // Solo un reembolso total cambia el estado del pago a `refunded`.
             const full = obj.refunded === true || (typeof obj.amount === 'number' && obj.amount_refunded === obj.amount);
             const orderId = obj.metadata && obj.metadata.orderId;
-            return full && typeof orderId === 'string' ? { kind: 'refunded', orderId, charge: obj } : null;
+            if (typeof orderId !== 'string') return null;
+            if (full) return { kind: 'refunded', orderId, charge: obj };
+            // Reembolso parcial (p. ej. desde el panel de Stripe): no cambia el estado del pago, solo el importe reembolsado.
+            return typeof obj.amount_refunded === 'number' && obj.amount_refunded > 0 ? { kind: 'partial_refund', orderId, charge: obj } : null;
         }
         default:
             return null;
@@ -682,6 +704,7 @@ function aggregateReport(orders, itemsByOrder = {}) {
         }
         if (o.status === 'cancelled') cancelled++;
         if (o.paymentStatus === 'refunded') refundedCents += cents(o.total);
+        else if (Number(o.refundedAmount) > 0) refundedCents += cents(o.refundedAmount);
     }
     const total = (orders || []).length;
     const top = Object.values(products).sort((a, b) => b.quantity - a.quantity || b.salesCents - a.salesCents).slice(0, 10)
@@ -693,7 +716,9 @@ function aggregateReport(orders, itemsByOrder = {}) {
         cancellationRate: total ? Math.round((cancelled / total) * 1000) / 10 : 0,
         refunded: refundedCents / 100,
         topProducts: top,
-        salesByDay: Object.keys(perDay).sort().map((d) => ({ day: d, sales: perDay[d] / 100 }))
+        salesByDay: Object.keys(perDay).sort().map((d) => ({ day: d, sales: perDay[d] / 100 })),
+        salesByWeek: Object.entries(groupSales(perDay, 'week')).sort().map(([day, c]) => ({ day, sales: c / 100 })),
+        salesByMonth: Object.entries(groupSales(perDay, 'month')).sort().map(([day, c]) => ({ day, sales: c / 100 }))
     };
 }
 
@@ -852,15 +877,259 @@ function makeInventory({ db, DB, MENU, MOVES, Query, hash }) {
     return { enabled, reserve, release, decrement, increment, rowIdFor };
 }
 
+// ======================================================
+// v11: repartidores (estados), motivos, reembolsos parciales, categorias, auditoria, informes
+// ======================================================
+const DRIVER_STALE_MS = 10 * 60 * 1000; // sin senal de la app mas de 10 min => "sin conexion reciente"
+const IN_TRANSIT = ['picked_up', 'on_the_way'];
+
+/**
+ * Estado de un repartidor. Se separan cuatro cosas:
+ *  - desconectado (`offline`): el propio repartidor se puso no disponible;
+ *  - disponible (`available`): conectado y puede recibir pedidos;
+ *  - ocupado (`busy`): lleva un pedido en transito o alcanzo su maximo de entregas activas;
+ *  - `connected`: ultima senal de su app reciente (informativo; no cambia el estado por si solo).
+ * Sin senal reciente NO se le considera disponible para asignacion automatica (`stale`).
+ */
+function driverState({ available, lastSeenAt = null, active = 0, inTransit = 0, maxActive = 3, now = Date.now() } = {}) {
+    const seen = lastSeenAt ? Date.parse(lastSeenAt) : NaN;
+    const seenMs = Number.isNaN(seen) ? null : seen;
+    const connected = seenMs !== null && now - seenMs <= DRIVER_STALE_MS;
+    const stale = seenMs !== null && !connected;
+    let status;
+    if (available === false) status = 'offline';
+    else if (inTransit > 0 || active >= maxActive) status = 'busy';
+    else status = 'available';
+    return { status, connected, stale, lastSeenAt: seenMs !== null ? new Date(seenMs).toISOString() : null };
+}
+
+const POOL_STATUSES = ['confirmed', 'preparing', 'ready'];
+
+/**
+ * Vista de un pedido SIN repartidor para la lista de "pedidos disponibles". Es deliberadamente pobre: sin nombre, telefono
+ * ni direccion del cliente (el repartidor los ve solo cuando el pedido ya es suyo); la zona es una posicion aproximada (~1 km).
+ */
+function toPoolView(order, items = [], distanceFromRestaurantKm = null) {
+    const round2 = (n) => (typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) / 100 : null);
+    return {
+        id: order.$id,
+        status: order.status,
+        createdAt: order.$createdAt,
+        total: order.total,
+        paymentMethod: order.paymentMethod || 'cash_on_delivery',
+        itemsCount: items.reduce((a, i) => a + Number(i.quantity || 0), 0),
+        areaLatitude: round2(order.deliveryLatitude),
+        areaLongitude: round2(order.deliveryLongitude),
+        distanceKm: typeof distanceFromRestaurantKm === 'number' ? Math.round(distanceFromRestaurantKm * 10) / 10 : null
+    };
+}
+const buildDriverCancelledNotification = (orderId) => ({ title: 'Pedido cancelado', body: `El pedido #${String(orderId).slice(-6)} fue cancelado. Ya no tienes que entregarlo.`, data: { type: 'order_cancelled', orderId } });
+
+/** Motivo de una cancelacion o incidencia: texto corto, sin saltos de linea raros. */
+function normalizeReason(value, { required = false, min = 3, max = 200 } = {}) {
+    if (value === undefined || value === null || value === '') {
+        return required ? { ok: false, code: 'reason_required', error: 'Indica el motivo.' } : { ok: true, reason: null };
+    }
+    if (typeof value !== 'string') return { ok: false, code: 'bad_reason', error: 'Motivo inválido.' };
+    const reason = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (reason.length < min && (required || reason.length > 0)) return { ok: false, code: 'reason_required', error: `El motivo debe tener al menos ${min} caracteres.` };
+    return { ok: true, reason: reason.slice(0, max) || null };
+}
+
+/**
+ * Reembolso (total o parcial) de un pedido en linea YA pagado. El importe se calcula y limita en el servidor:
+ * nunca supera lo cobrado menos lo ya reembolsado. Trabaja en centavos para no acumular errores de decimales.
+ */
+function planRefund({ order, amount, reason } = {}) {
+    if (!order || order.paymentMethod !== 'online') return { ok: false, status: 409, code: 'not_online', error: 'Este pedido no tiene pago en línea.' };
+    if (order.paymentStatus !== 'paid') {
+        return { ok: false, status: 409, code: order.paymentStatus === 'refunded' ? 'already_refunded' : 'not_paid', error: order.paymentStatus === 'refunded' ? 'El pedido ya fue reembolsado por completo.' : 'Solo se reembolsan pedidos pagados.' };
+    }
+    const total = cents(order.total);
+    const done = cents(order.refundedAmount || 0);
+    const remaining = total - done;
+    if (remaining <= 0) return { ok: false, status: 409, code: 'already_refunded', error: 'El pedido ya fue reembolsado por completo.' };
+    let amt = remaining;
+    if (amount !== undefined && amount !== null) {
+        if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) return { ok: false, status: 400, code: 'bad_amount', error: 'Importe inválido.' };
+        amt = cents(amount);
+        if (amt < 1) return { ok: false, status: 400, code: 'bad_amount', error: 'Importe inválido.' };
+        if (amt > remaining) return { ok: false, status: 422, code: 'amount_exceeds', error: 'El importe supera lo que queda por reembolsar.' };
+    }
+    const why = normalizeReason(reason, { required: true });
+    if (!why.ok) return { ok: false, status: 400, code: why.code, error: why.error };
+    const after = done + amt;
+    return { ok: true, amountCents: amt, doneCents: done, afterCents: after, full: after === total, reason: why.reason };
+}
+
+/** Categoria: nombre obligatorio al crear; descripcion corta; `active` booleano. */
+function validateCategoryInput(input, { partial = false } = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, code: 'bad_category', error: 'Datos inválidos.' };
+    const out = {};
+    if (input.name !== undefined || !partial) {
+        const name = typeof input.name === 'string' ? input.name.trim() : '';
+        if (name.length < 2 || name.length > 60) return { ok: false, code: 'bad_category', error: 'El nombre debe tener entre 2 y 60 caracteres.' };
+        out.name = name;
+    }
+    if (input.description !== undefined) {
+        if (typeof input.description !== 'string' || input.description.length > 200) return { ok: false, code: 'bad_category', error: 'La descripción admite hasta 200 caracteres.' };
+        out.description = input.description.trim();
+    }
+    if (input.active !== undefined) {
+        if (typeof input.active !== 'boolean') return { ok: false, code: 'bad_category', error: 'Estado inválido.' };
+        out.active = input.active;
+    }
+    return { ok: true, data: out };
+}
+
+/** Entrada del registro de auditoria administrativa (sin datos personales: solo ids y un resumen corto). */
+function buildAuditEntry({ actorId, actorRole, action, targetType = null, targetId = null, summary = '' }) {
+    return {
+        actorId: String(actorId || '').slice(0, 64),
+        actorRole: String(actorRole || '').slice(0, 16),
+        action: String(action || '').slice(0, 40),
+        targetType: targetType ? String(targetType).slice(0, 24) : null,
+        targetId: targetId ? String(targetId).slice(0, 64) : null,
+        summary: String(summary || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 200)
+    };
+}
+
+/** Si el usuario puede cambiar su estado (activar/desactivar cuenta): no a si mismo ni al ultimo administrador. */
+function validateUserStatusChange({ actorId, targetId, active, targetLabels = [], otherActiveAdmins = 1 }) {
+    if (typeof active !== 'boolean') return { ok: false, status: 400, code: 'bad_request', error: 'Indica el estado.' };
+    if (actorId === targetId) return { ok: false, status: 409, code: 'self_disable', error: 'No puedes cambiar el estado de tu propia cuenta.' };
+    if (!active && targetLabels.includes('admin') && otherActiveAdmins < 1) return { ok: false, status: 409, code: 'last_admin', error: 'No se puede desactivar al último administrador.' };
+    return { ok: true };
+}
+
+/** Agrupa ventas diarias por semana (lunes) o mes: {periodo: centavos}. */
+function groupSales(perDay, by = 'day') {
+    const out = {};
+    for (const [day, cts] of Object.entries(perDay || {})) {
+        let key = day;
+        if (by === 'month') key = day.slice(0, 7);
+        if (by === 'week') {
+            const d = new Date(`${day}T00:00:00Z`);
+            const dow = (d.getUTCDay() + 6) % 7; // lunes = 0
+            d.setUTCDate(d.getUTCDate() - dow);
+            key = d.toISOString().slice(0, 10);
+        }
+        out[key] = (out[key] || 0) + cts;
+    }
+    return out;
+}
+
+/**
+ * Tablero del administrador a partir de pedidos reales (nada estimado).
+ * Ventas = entregados (en linea: solo si estan pagados). Ingresos por metodo = entregados por metodo.
+ */
+function buildDashboard(orders, itemsByOrder = {}, { now = Date.now() } = {}) {
+    const base = aggregateReport(orders, itemsByOrder);
+    const todayKey = new Date(now).toISOString().slice(0, 10);
+    let todayOrders = 0, cashCents = 0, onlineCents = 0, discountCents = 0, feeCents = 0, partialRefundCents = 0;
+    const byDriver = {};
+    const unpaidOnline = [];
+    const paymentCounts = {};
+    for (const o of orders || []) {
+        if (!o) continue;
+        if (String(o.$createdAt || '').slice(0, 10) === todayKey) todayOrders++;
+        const ps = o.paymentStatus || (o.paymentMethod === 'online' ? 'pending' : 'not_required');
+        paymentCounts[ps] = (paymentCounts[ps] || 0) + 1;
+        if (o.status === 'delivered') {
+            if (o.paymentMethod === 'online') onlineCents += cents(o.total); else cashCents += cents(o.total);
+            discountCents += cents(o.discount || 0);
+            feeCents += cents(o.deliveryFee || 0);
+        }
+        if (o.paymentStatus === 'paid' && Number(o.refundedAmount) > 0) partialRefundCents += cents(o.refundedAmount);
+        if (o.paymentMethod === 'online' && ['pending', 'failed'].includes(o.paymentStatus || 'pending') && o.status !== 'cancelled') unpaidOnline.push(o.$id);
+        if (o.driverUserId) {
+            const d = (byDriver[o.driverUserId] ||= { driverUserId: o.driverUserId, name: o.driverName || 'Repartidor', delivered: 0, failed: 0, cancelled: 0, active: 0 });
+            if (o.status === 'delivered') d.delivered++;
+            else if (o.status === 'delivery_failed') d.failed++;
+            else if (o.status === 'cancelled') d.cancelled++;
+            else d.active++;
+        }
+    }
+    return {
+        ...base,
+        todayOrders,
+        revenueByMethod: { cash: cashCents / 100, online: onlineCents / 100 },
+        discounts: discountCents / 100,
+        deliveryFees: feeCents / 100,
+        partialRefunds: partialRefundCents / 100,
+        paymentCounts,
+        unpaidOnlineOrders: unpaidOnline.length,
+        drivers: Object.values(byDriver).sort((a, b) => b.delivered - a.delivered),
+        pipeline: {
+            pending: base.byStatus.pending || 0,
+            accepted: base.byStatus.confirmed || 0,
+            preparing: (base.byStatus.preparing || 0) + (base.byStatus.ready || 0),
+            onTheWay: (base.byStatus.picked_up || 0) + (base.byStatus.on_the_way || 0),
+            delivered: base.byStatus.delivered || 0
+        }
+    };
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// MODO DEMOSTRACION (DEMO_AUTOPILOT=true): avanza los pedidos solo y usa repartidores FICTICIOS.
+// Es una simulacion para presentar la app: no hay personas ni GPS reales. Solo la Function lo ejecuta.
+// ---------------------------------------------------------------------------------------------
+const DEMO_STEPS = {
+    pending: { to: 'confirmed', delay: 0 },
+    confirmed: { to: 'preparing', delay: 12 },
+    preparing: { to: 'ready', delay: 20 },
+    ready: { to: 'picked_up', delay: 8 },
+    picked_up: { to: 'on_the_way', delay: 5 },
+    on_the_way: { to: 'delivered', delay: null }
+};
+const DEMO_DRIVERS = ['Carlos (demo)', 'Marisol (demo)', 'Diego (demo)', 'Fernanda (demo)'];
+
+/** Siguiente paso de la simulacion: { to, delay } en segundos (el viaje usa `tripSeconds`) o null si ya termino. */
+function demoNextStep(status, tripSeconds = 90) {
+    const step = DEMO_STEPS[status];
+    if (!step) return null;
+    return { to: step.to, delay: step.delay === null ? tripSeconds : step.delay };
+}
+
+/** Repartidor ficticio estable para un pedido (mismo pedido, mismo repartidor). */
+function demoDriverFor(orderId) {
+    let h = 0;
+    for (const c of String(orderId)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    const i = h % DEMO_DRIVERS.length;
+    return { id: `demo-driver-${i + 1}`, name: DEMO_DRIVERS[i] };
+}
+
+const lerpPoint = (a, b, p) => ({ latitude: a.latitude + (b.latitude - a.latitude) * p, longitude: a.longitude + (b.longitude - a.longitude) * p });
+
+/**
+ * Posicion simulada del repartidor segun el estado y el avance (0..1) dentro de ese estado:
+ * preparing: llega hacia el restaurante desde ~1 km; ready: termina de llegar; picked_up: en el restaurante;
+ * on_the_way: recorre en linea recta del restaurante al cliente. Devuelve null si faltan coordenadas.
+ */
+function demoPosition({ status, progress, restaurant, destination }) {
+    if (!restaurant) return null;
+    const p = Math.min(1, Math.max(0, Number(progress) || 0));
+    const start = { latitude: restaurant.latitude + 0.008, longitude: restaurant.longitude + 0.008 };
+    const mid = lerpPoint(start, restaurant, 0.5);
+    if (status === 'preparing') return lerpPoint(start, mid, p);
+    if (status === 'ready') return lerpPoint(mid, restaurant, p);
+    if (status === 'picked_up') return { ...restaurant };
+    if (status === 'on_the_way') return destination ? lerpPoint(restaurant, destination, p) : { ...restaurant };
+    return null;
+}
+
 export {
+    demoNextStep, demoDriverFor, demoPosition, DEMO_DRIVERS,
     TRANSITIONS, ACTIVE_DELIVERY, ASSIGNABLE, TERMINAL,
     canActorTransition, priceOrder, validateDriverPosition,
-    validateAddressInput, validatePhone, distanceKm, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID,
+    validateAddressInput, validatePhone, distanceKm, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID, countRecentOrders, MAX_ORDERS_PER_WINDOW,
     ROLE_LABELS, DEFAULT_LOW_STOCK, stockOf, totalsByMenu, checkStock, moveKey, isLowStock, validateProductInput, planStockAdjust,
     validateRoleChange, aggregateReport, toCsv, pickDriver, makeInventory, buildLowStockNotification, buildDriverRejectedNotification, canAssignDriver, toStaffOrderView,
     checkExpected, parseDateRange, matchesOrderQuery, buildOrderEvent, isMenuAvailable,
     PAYMENT_METHODS, PAYMENT_STATUSES, PAYMENT_TRANSITIONS, CURRENCY, validatePaymentMethod, movePaymentStatus,
     buildCheckoutSessionParams, formEncode, checkSessionPayment, paymentIntentId,
     parseStripeSignatureHeader, isFreshTimestamp, signedPayload, stripeEventToPayment, stripeRequest, isStripeCheckoutUrl,
+    POOL_STATUSES, toPoolView, buildDriverCancelledNotification, DRIVER_STALE_MS, IN_TRANSIT, driverState, normalizeReason, planRefund, validateCategoryInput, buildAuditEntry, validateUserStatusChange, groupSales, buildDashboard,
     buildStatusNotification, buildOrderReceivedNotification, buildAssignmentNotification, buildPaymentNotification, buildPushRequest
 };

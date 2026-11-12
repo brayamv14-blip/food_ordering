@@ -80,3 +80,29 @@ describe("servicio de personal (una sola función con campo action)", () => {
         expect(describeBackendError(new BackendNotConfiguredError("X"))).toMatch(/X/);
     });
 });
+
+describe("v11: servicio de repartidor y reembolsos", () => {
+    it("pool, claim, recepción, reporte y reembolso usan la acción correcta", async () => {
+        const s = require("@/lib/services/staff.service");
+        mockCall.mockResolvedValue({ orders: [{ id: "p1" }], offline: true });
+        expect(await s.listAvailableOrders()).toEqual({ orders: [{ id: "p1" }], offline: true });
+        expect(mockCall).toHaveBeenCalledWith("fnOps", { action: "availableOrders" });
+        mockCall.mockResolvedValue({});
+        await s.claimOrder("o1");
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "claimOrder", orderId: "o1" });
+        mockCall.mockResolvedValue({ receivedAt: "T" });
+        expect(await s.confirmReceipt("o1")).toBe("T");
+        await s.reportOrderIssue("o1", "No llegó");
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "reportIssue", orderId: "o1", reason: "No llegó" });
+        mockCall.mockResolvedValue({ refundedAmount: 10, full: false });
+        expect(await s.refundOrder("o1", "Cortesía", 10)).toEqual({ refundedAmount: 10, full: false });
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "refundOrder", orderId: "o1", reason: "Cortesía", amount: 10 });
+    });
+    it("cancelar envía el motivo y driversMap tolera respuestas incompletas", async () => {
+        const s = require("@/lib/services/staff.service");
+        mockCall.mockResolvedValue({});
+        await s.changeOrderStatus("o1", "cancelled", {}, "Sin stock");
+        expect(mockCall).toHaveBeenLastCalledWith("fnOps", { action: "updateStatus", orderId: "o1", status: "cancelled", reason: "Sin stock" });
+        expect(await s.getDriversMap()).toMatchObject({ restaurant: null, drivers: [], orders: [], unassigned: [] });
+    });
+});

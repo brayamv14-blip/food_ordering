@@ -25,7 +25,6 @@ const AddressPicker = ({ onSelect, initial }: Props) => {
     const [debounced] = useDebounce(text, 450);
     const [suggestions, setSuggestions] = useState<GeoPlace[]>([]);
     const [busy, setBusy] = useState(false);
-    const [searchBusy, setSearchBusy] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
     const [mapOpen, setMapOpen] = useState(false);
     const [picked, setPicked] = useState<GeoPlace | null>(null);
@@ -34,41 +33,24 @@ const AddressPicker = ({ onSelect, initial }: Props) => {
 
     useEffect(() => {
         let alive = true;
-
         if (!configured || debounced.trim().length < 3) {
-            return () => {
-                alive = false;
-            };
+            setSuggestions([]);
+            return;
         }
-
-        const timer = setTimeout(() => {
+        setBusy(true);
+        autocompleteAddress(debounced).then((r) => {
             if (!alive) return;
-
-            setSearchBusy(true);
-
-            autocompleteAddress(debounced).then((r) => {
-                if (!alive) return;
-
-                setSearchBusy(false);
-
-                if (r.ok) {
-                    setSuggestions(r.value);
-                    setMessage(null);
-                } else {
-                    setSuggestions([]);
-                    setMessage(geoFailureMessage(r.reason));
-                }
-            }).catch(() => {
-                if (!alive) return;
-                setSearchBusy(false);
+            setBusy(false);
+            if (r.ok) {
+                setSuggestions(r.value);
+                setMessage(null);
+            } else {
                 setSuggestions([]);
-                setMessage("No se pudo buscar la dirección.");
-            });
-        }, 0);
-
+                setMessage(geoFailureMessage(r.reason));
+            }
+        });
         return () => {
             alive = false;
-            clearTimeout(timer);
         };
     }, [debounced, configured]);
 
@@ -112,8 +94,8 @@ const AddressPicker = ({ onSelect, initial }: Props) => {
                 accessibilityLabel="Buscar dirección"
                 editable={configured}
             />
-            {(busy || searchBusy) && <ActivityIndicator size="small" color="#FF9C01" className="mt-2" />}
-            {debounced.trim().length >= 3 && suggestions.map((s, i) => (
+            {busy && <ActivityIndicator size="small" color="#FF9C01" className="mt-2" />}
+            {suggestions.map((s, i) => (
                 <TouchableOpacity key={`${s.latitude},${s.longitude},${i}`} onPress={() => choose(s)} className="border-b border-gray-100 py-3" accessibilityRole="button">
                     <Text className="text-dark-100">{s.line}</Text>
                 </TouchableOpacity>

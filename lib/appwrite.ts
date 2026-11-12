@@ -19,6 +19,13 @@ import {
     Category
 } from "@/type";
 
+/** Permisos por fila del perfil: solo su dueño (formato de cadena de Appwrite). */
+export const ownerPermissions = (accountId: string): string[] => [
+    `read("user:${accountId}")`,
+    `update("user:${accountId}")`,
+    `delete("user:${accountId}")`
+];
+
 export const appwriteConfig = {
     endpoint: process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT!,
     projectId: process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID!,
@@ -193,6 +200,8 @@ export const createUser = async ({
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
             rowId: ID.unique(),
+            // V12: el perfil solo lo lee/edita su dueño (la tabla ya no concede permisos a "any").
+            permissions: ownerPermissions(accountId),
             data: {
                 email,
                 name: accountName,
@@ -326,6 +335,7 @@ const loadCurrentUser = async () => {
             databaseId: appwriteConfig.databaseId,
             tableId: appwriteConfig.userCollectionId,
             rowId: ID.unique(),
+            permissions: ownerPermissions(currentAccount.$id),
             data: {
                 email: currentAccount.email,
                 name: currentAccount.name,
@@ -348,10 +358,15 @@ const loadCurrentUser = async () => {
 
 export const getMenu = async ({
     category,
-    query
+    query,
+    limit,
+    newest
 }: GetMenuParams): Promise<MenuItem[]> => {
     try {
         const queries: string[] = [];
+
+        if (typeof limit === "number" && limit > 0) queries.push(Query.limit(limit));
+        if (newest) queries.push(Query.orderDesc("$createdAt"));
 
         if (category) {
             queries.push(
@@ -415,7 +430,8 @@ export const getCategories = async (): Promise<Category[]> => {
             tableId: appwriteConfig.categoriesCollectionId
         });
 
-        return categories.rows.map((row) => ({
+        // Las categorias desactivadas por el admin no se muestran al cliente.
+        return categories.rows.filter((row) => (row as { active?: boolean }).active !== false).map((row) => ({
             $id: row.$id,
             $createdAt: row.$createdAt,
             $updatedAt: row.$updatedAt,
@@ -432,6 +448,26 @@ export const getCategories = async (): Promise<Category[]> => {
 
         throw e;
     }
+};
+
+
+// ======================================================
+// PEDIDO ACTIVO DEL CLIENTE (para el acceso rapido de la pantalla principal)
+// ======================================================
+
+export const getActiveOrder = async (userId: string): Promise<{ $id: string; status: string; total: number; paymentMethod: string; paymentStatus: string } | null> => {
+    const res = await databases.listRows({
+        databaseId: appwriteConfig.databaseId,
+        tableId: appwriteConfig.ordersCollectionId,
+        queries: [
+            Query.equal("userId", userId),
+            Query.equal("status", ["pending", "confirmed", "preparing", "ready", "picked_up", "on_the_way", "delivery_failed"]),
+            Query.orderDesc("$createdAt"),
+            Query.limit(1)
+        ]
+    });
+    const row = res.rows[0];
+    return row ? { $id: row.$id, status: String(row.status), total: Number(row.total) || 0, paymentMethod: String(row.paymentMethod ?? "cash_on_delivery"), paymentStatus: String(row.paymentStatus ?? "not_required") } : null;
 };
 
 

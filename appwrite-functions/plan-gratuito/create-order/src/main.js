@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Client, ID, Messaging, Permission, Query, Role, TablesDB, Users } from 'node-appwrite';
 import {
     buildCheckoutSessionParams, buildLowStockNotification, buildOrderEvent, checkStock, makeInventory, buildOrderReceivedNotification, buildPushRequest, isStripeCheckoutUrl,
-    priceOrder, stripeRequest, validateAddressInput, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID, validatePaymentMethod, validatePhone
+    priceOrder, stripeRequest, validateAddressInput, checkCoverage, countOpenUnpaid, MAX_OPEN_UNPAID, countRecentOrders, MAX_ORDERS_PER_WINDOW, validatePaymentMethod, validatePhone
 } from './rules.js';
 
 const DB = process.env.DATABASE_ID;
@@ -28,7 +28,7 @@ const BACKEND_VERSION = 'v10';
  * Crea la sesion de Stripe Checkout con el importe calculado en el servidor.
  * La clave de idempotencia ligada al pedido evita crear dos sesiones (y dos cobros) por reintentos.
  */
-async function createCheckoutSession(orderId, userId, total) {
+async function createCheckoutSession(orderId, userId, total, logError = () => {}) {
     const res = await stripeRequest({
         secret: STRIPE_KEY,
         path: '/v1/checkout/sessions',
@@ -36,7 +36,12 @@ async function createCheckoutSession(orderId, userId, total) {
         idempotencyKey: `checkout-${orderId}-1`
     });
     const s = res.data;
-    if (!res.ok || !s || typeof s.id !== 'string' || !isStripeCheckoutUrl(s.url)) return null;
+    if (!res.ok || !s || typeof s.id !== 'string' || !isStripeCheckoutUrl(s.url)) {
+        // Diagnostico sin datos sensibles: solo estado HTTP y tipo/codigo/parametro del error de Stripe (nunca la clave).
+        const e = (s && s.error) || {};
+        logError(`stripe_checkout_failed status=${res.status} type=${e.type || '-'} code=${e.code || '-'} param=${e.param || '-'} msg=${String(e.message || '').replace(/(sk|rk|pk)_[A-Za-z0-9_]+/g, '[clave]').slice(0, 160)}`);
+        return null;
+    }
     return { id: s.id, url: s.url };
 }
 
@@ -124,13 +129,16 @@ export default async ({ req, res, log, error }) => {
             });
         }
 
-        // Limite anti-abuso: demasiados pedidos en linea sin pagar generarian muchas sesiones de Stripe.
-        if (online) {
+        // Limites anti-abuso: demasiados pedidos seguidos (cualquier metodo) o muchos pedidos en linea sin pagar.
+        {
             const recent = (await db.listRows({
                 databaseId: DB, tableId: ORDERS,
                 queries: [Query.equal('userId', userId), Query.orderDesc('$createdAt'), Query.limit(30)]
             })).rows;
-            if (countOpenUnpaid(recent) >= MAX_OPEN_UNPAID) {
+            if (countRecentOrders(recent) >= MAX_ORDERS_PER_WINDOW) {
+                return fail(res, 429, 'rate_limited', 'Estás haciendo muchos pedidos seguidos. Espera unos minutos e inténtalo de nuevo.');
+            }
+            if (online && countOpenUnpaid(recent) >= MAX_OPEN_UNPAID) {
                 return fail(res, 429, 'too_many_open_orders', 'Tienes varios pedidos en línea sin pagar. Paga o cancela alguno antes de crear otro.');
             }
         }
@@ -257,7 +265,7 @@ export default async ({ req, res, log, error }) => {
 
         let checkoutUrl;
         if (online) {
-            const session = await createCheckoutSession(order.$id, userId, priced.total);
+            const session = await createCheckoutSession(order.$id, userId, priced.total, error);
             let saved = false;
             if (session) {
                 try {

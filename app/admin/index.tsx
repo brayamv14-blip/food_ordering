@@ -14,6 +14,7 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import OrderStatusBadge from "@/components/OrderStatusBadge";
+import ReasonModal from "@/components/ReasonModal";
 import LeafletMap from "@/components/LeafletMap";
 import { FRESHNESS_LABEL, describeAge, locationFreshness } from "@/lib/domain/coordinates";
 import { MapData, MapMarker } from "@/lib/domain/geo";
@@ -35,6 +36,8 @@ import {
 import { formatMoney } from "@/lib/domain/pricing";
 import { getMyRoles } from "@/lib/services/roles";
 import {
+    DRIVER_STATUS_COLOR,
+    DRIVER_STATUS_LABEL,
     DriverOption,
     OrderEvent,
     StaffOrder,
@@ -50,7 +53,13 @@ import {
 const EVENT_LABELS: Record<string, string> = {
     created: "Pedido creado",
     status: "Cambio de estado",
-    driver_assigned: "Repartidor asignado"
+    driver_assigned: "Repartidor asignado",
+    driver_claimed: "Repartidor tomó el pedido",
+    picked_up: "Pedido recogido",
+    received: "Cliente confirmó recepción",
+    customer_issue: "Problema reportado por el cliente",
+    driver_rejected: "Repartidor rechazó",
+    refund: "Reembolso"
 };
 const ROLE_LABELS: Record<string, string> = { customer: "cliente", staff: "personal", driver: "repartidor" };
 
@@ -131,7 +140,14 @@ const AdminOrders = () => {
         }
     };
 
+    const [cancelFor, setCancelFor] = useState<StaffOrder | null>(null);
+
     const confirmAction = (order: StaffOrder, to: OrderStatus, label: string, destructive: boolean) => {
+        // Cancelar exige motivo (se guarda en el historial y el servidor lo valida).
+        if (to === "cancelled") {
+            setCancelFor(order);
+            return;
+        }
         const go = () => run(order.id, () => changeOrderStatus(order.id, to, { expectedStatus: order.status, expectedUpdatedAt: order.updatedAt }));
         Alert.alert(label, destructive ? "Esta acción no se puede deshacer." : `¿Confirmas “${label}” para el pedido #${order.id.slice(-6)}?`, [
             { text: "No", style: "cancel" },
@@ -157,7 +173,7 @@ const AdminOrders = () => {
         if (!mapOrder) return;
         setMapRefreshing(true);
         try {
-            const fresh = (await listStaffOrders({ status: mapOrder.status })).find((o) => o.id === mapOrder.id);
+            const fresh = (await listStaffOrders({ status: mapOrder.status as OrderStatus })).find((o) => o.id === mapOrder.id);
             if (fresh) setMapOrder(fresh);
         } catch {
             /* se conserva la última ubicación conocida */
@@ -328,6 +344,20 @@ const AdminOrders = () => {
                 }}
             />
 
+            <ReasonModal
+                visible={!!cancelFor}
+                title="Motivo de la cancelación"
+                options={["Cliente lo pidió", "Sin stock", "Dirección fuera de cobertura", "Pago no válido"]}
+                confirmLabel="Cancelar pedido"
+                destructive
+                onClose={() => setCancelFor(null)}
+                onConfirm={(reason) => {
+                    const o = cancelFor!;
+                    setCancelFor(null);
+                    run(o.id, () => changeOrderStatus(o.id, "cancelled", { expectedStatus: o.status, expectedUpdatedAt: o.updatedAt }, reason));
+                }}
+            />
+
             <Modal visible={!!pickFor} transparent animationType="slide" onRequestClose={() => setPickFor(null)}>
                 <View className="flex-1 justify-end bg-black/40">
                     <View className="rounded-t-3xl bg-white p-5 pb-10">
@@ -350,7 +380,12 @@ const AdminOrders = () => {
                                 }}
                                 className="border-b border-gray-100 py-4"
                             >
-                                <Text className="text-base text-dark-100">{d.name}</Text>
+                                <View className="flex-row items-center justify-between">
+                                    <Text className="text-base text-dark-100">{d.name}</Text>
+                                    <Text style={{ color: DRIVER_STATUS_COLOR[d.status ?? "offline"] }} className="text-xs font-semibold">
+                                        {DRIVER_STATUS_LABEL[d.status ?? "offline"]} · {d.activeOrders ?? 0} activo(s)
+                                    </Text>
+                                </View>
                             </TouchableOpacity>
                         ))}
                         <TouchableOpacity onPress={() => setPickFor(null)} className="mt-4 items-center py-3">
@@ -405,6 +440,7 @@ const AdminOrders = () => {
                                         {e.type === "status" && e.to ? `: ${getStatusMeta(e.from).label} → ${getStatusMeta(e.to).label}` : ""}
                                     </Text>
                                     <Text className="text-xs text-gray-400">{new Date(e.at).toLocaleString("es-MX")} · {ROLE_LABELS[e.actorRole ?? ""] ?? "sistema"}</Text>
+                                    {!!e.note && <Text className="text-xs text-dark-100">Motivo: {e.note}</Text>}
                                 </View>
                             )}
                         />

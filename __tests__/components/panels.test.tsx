@@ -1,10 +1,12 @@
-import { Alert, Linking } from "react-native";
+﻿import { Alert, Linking } from "react-native";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react-native";
 
+// El mapa usa react-native-webview (modulo nativo): en Jest se sustituye por un componente vacio.
+jest.mock("@/components/LeafletMap", () => ({ __esModule: true, default: () => null }));
 jest.mock("expo-router", () => ({ router: { back: jest.fn(), push: jest.fn(), replace: jest.fn() } }));
 const mockRoles = jest.fn();
 jest.mock("@/lib/services/roles", () => ({ getMyRoles: () => mockRoles() }));
-const mockList = jest.fn(), mockDrivers = jest.fn(), mockAssign = jest.fn(), mockChange = jest.fn(), mockMine = jest.fn(), mockSend = jest.fn(), mockHistory = jest.fn(), mockRespond = jest.fn(), mockAvail = jest.fn();
+const mockList = jest.fn(), mockDrivers = jest.fn(), mockAssign = jest.fn(), mockChange = jest.fn(), mockMine = jest.fn(), mockSend = jest.fn(), mockHistory = jest.fn(), mockRespond = jest.fn(), mockAvail = jest.fn(), mockPool = jest.fn(), mockClaim = jest.fn();
 jest.mock("@/lib/services/staff.service", () => ({
     sendDriverLocation: (...a: any[]) => mockSend(...a),
     getOrderHistory: (...a: any[]) => mockHistory(...a),
@@ -15,6 +17,10 @@ jest.mock("@/lib/services/staff.service", () => ({
     changeOrderStatus: (...a: any[]) => mockChange(...a),
     listMyDeliveries: (...a: any[]) => mockMine(...a),
     respondAssignment: (...a: any[]) => mockRespond(...a),
+    listAvailableOrders: (...a: any[]) => mockPool(...a),
+    claimOrder: (...a: any[]) => mockClaim(...a),
+    DRIVER_STATUS_LABEL: { offline: "Desconectado", available: "Disponible", busy: "Ocupado" },
+    DRIVER_STATUS_COLOR: { offline: "#9CA3AF", available: "#16A34A", busy: "#F59E0B" },
     setDriverAvailability: (...a: any[]) => mockAvail(...a),
     describeBackendError: (e: any) => e?.message ?? "error"
 }));
@@ -66,8 +72,13 @@ describe("panel de administración", () => {
         (Alert.alert as jest.Mock).mock.calls[0][2][1].onPress(); // el empleado confirma
         await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "confirmed", { expectedStatus: "pending", expectedUpdatedAt: "T1" }));
         fireEvent.press(screen.getByText("Cancelar pedido"));
-        expect(Alert.alert).toHaveBeenCalledWith("Cancelar pedido", expect.any(String), expect.any(Array));
-        expect(mockChange).toHaveBeenCalledTimes(1); // aún no se canceló
+        // Cancelar exige motivo: se abre el modal y todavía no se llama al servidor.
+        expect(screen.getByText("Motivo de la cancelación")).toBeTruthy();
+        expect(mockChange).toHaveBeenCalledTimes(1);
+        fireEvent.press(screen.getByLabelText("Motivo: Sin stock"));
+        const confirm = screen.getAllByText("Cancelar pedido").at(-1)!;
+        fireEvent.press(confirm);
+        await waitFor(() => expect(mockChange).toHaveBeenLastCalledWith("ord12345", "cancelled", { expectedStatus: "pending", expectedUpdatedAt: "T1" }, "Sin stock"));
     });
 
     it("muestra el error del servidor y no cambia nada si rechaza la operación", async () => {
@@ -217,7 +228,7 @@ describe("pantalla del repartidor", () => {
         fireEvent.press(await screen.findByText("Compartir ubicación"));
         await waitFor(() => expect(mockSend).toHaveBeenCalled());
         fireEvent.press(screen.getByText("Marcar entregado"));
-        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "delivered"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "delivered", {}, undefined));
         expect(screen.queryByText(/Compartiendo tu ubicación/)).toBeNull();
     });
 });
@@ -264,14 +275,29 @@ describe("pantalla del repartidor: asignación, recogido y disponibilidad", () =
         expect(screen.getByText("Rechazar")).toBeTruthy();
         expect(screen.queryByText("Ya recogí el pedido")).toBeNull();
         fireEvent.press(screen.getByText("Aceptar"));
-        await waitFor(() => expect(mockRespond).toHaveBeenCalledWith("ord12345", true));
+        await waitFor(() => expect(mockRespond).toHaveBeenCalledWith("ord12345", true, undefined));
     });
 
-    it("rechazar llama al servidor con accept=false", async () => {
+    it("rechazar pide motivo y llama al servidor con accept=false y el motivo", async () => {
         mockMine.mockResolvedValue([order({ status: "preparing", driverUserId: "me", driverResponse: "pending" })]);
         render(<DriverDeliveries />);
         fireEvent.press(await screen.findByText("Rechazar"));
-        await waitFor(() => expect(mockRespond).toHaveBeenCalledWith("ord12345", false));
+        expect(mockRespond).not.toHaveBeenCalled();
+        fireEvent.press(screen.getByLabelText("Motivo: Estoy lejos"));
+        fireEvent.press(screen.getAllByText("Rechazar").at(-1)!);
+        await waitFor(() => expect(mockRespond).toHaveBeenCalledWith("ord12345", false, "Estoy lejos"));
+    });
+
+    it("pestaña Disponibles: aceptar toma el pedido y un 409 muestra el error", async () => {
+        mockMine.mockResolvedValue([]);
+        mockPool.mockResolvedValue({ offline: false, orders: [{ id: "pool12345", status: "ready", createdAt: "T", total: 120, paymentMethod: "online", itemsCount: 2, areaLatitude: 19.4, areaLongitude: -99.1, distanceKm: 3 }] });
+        mockClaim.mockRejectedValueOnce(Object.assign(new Error("Otro repartidor ya lo tomó."), { code: "already_taken" }));
+        render(<DriverDeliveries />);
+        fireEvent.press(await screen.findByText("Disponibles"));
+        fireEvent.press(await screen.findByText("Aceptar pedido"));
+        await waitFor(() => expect(mockClaim).toHaveBeenCalledWith("pool12345"));
+        await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith("No se pudo tomar el pedido", "Otro repartidor ya lo tomó."));
+        expect(screen.queryByText(/Total \$120/)).not.toBeNull(); // el pool no muestra datos del cliente
     });
 
     it("recogido y salir a reparto son pasos distintos", async () => {
@@ -281,26 +307,26 @@ describe("pantalla del repartidor: asignación, recogido y disponibilidad", () =
         // Tras cambiar el estado la pantalla recarga: el servidor ya devuelve "recogido".
         mockMine.mockResolvedValue([order({ status: "picked_up", driverUserId: "me", driverResponse: "accepted" })]);
         fireEvent.press(pickup);
-        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "picked_up"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "picked_up", {}, undefined));
         fireEvent.press(await screen.findByText("Salir a reparto"));
-        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "on_the_way"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "on_the_way", {}, undefined));
     });
 
     it("la entrega fallida se puede reintentar", async () => {
         mockMine.mockResolvedValue([order({ status: "delivery_failed", driverUserId: "me" })]);
         render(<DriverDeliveries />);
         fireEvent.press(await screen.findByText("Reintentar entrega"));
-        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "on_the_way"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "on_the_way", {}, undefined));
     });
 
-    it("desde \"recogido\" se puede reportar entrega fallida (con confirmación)", async () => {
+    it("desde \"recogido\" se puede reportar entrega fallida (con motivo obligatorio)", async () => {
         mockMine.mockResolvedValue([order({ status: "picked_up", driverUserId: "me", driverResponse: "accepted" })]);
         render(<DriverDeliveries />);
         fireEvent.press(await screen.findByText("No pude entregar"));
-        expect(Alert.alert).toHaveBeenCalledWith("Entrega fallida", expect.any(String), expect.any(Array));
-        const buttons = (Alert.alert as jest.Mock).mock.calls.at(-1)[2];
-        await act(async () => { buttons.find((b: any) => b.text === "Sí, registrar").onPress(); });
-        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "delivery_failed"));
+        expect(mockChange).not.toHaveBeenCalled();
+        fireEvent.press(screen.getByLabelText("Motivo: Cliente no respondió"));
+        fireEvent.press(screen.getByText("Registrar"));
+        await waitFor(() => expect(mockChange).toHaveBeenCalledWith("ord12345", "delivery_failed", {}, "Cliente no respondió"));
     });
 
     it("el interruptor de disponibilidad se guarda en el servidor", async () => {
@@ -309,6 +335,7 @@ describe("pantalla del repartidor: asignación, recogido y disponibilidad", () =
         render(<DriverDeliveries />);
         fireEvent.press(await screen.findByLabelText("Disponible para recibir pedidos"));
         await waitFor(() => expect(mockAvail).toHaveBeenCalledWith(false));
-        await screen.findByText(/No disponible/);
+        await screen.findByText(/Desconectado: no recibirás pedidos/);
     });
 });
+

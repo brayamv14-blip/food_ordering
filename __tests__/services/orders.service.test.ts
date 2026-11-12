@@ -436,6 +436,16 @@ describe("cancelación y suscripción", () => {
         expect(mockCancel).toHaveBeenCalledTimes(1);
     });
 
+    it("V13: en nativo también se suscribe y, si Realtime falla, devuelve undefined (queda el sondeo)", () => {
+        const close = jest.fn();
+        mockClient.subscribe.mockReturnValueOnce(close);
+        const unsub = subscribeToOrder("o9", jest.fn());
+        expect(mockClient.subscribe).toHaveBeenCalled();
+        expect(unsub).toBe(close);
+        mockClient.subscribe.mockImplementationOnce(() => { throw new Error("ws"); });
+        expect(subscribeToOrder("o9", jest.fn())).toBeUndefined();
+    });
+
     it("se suscribe al canal de la fila del pedido y devuelve el cierre", () => {
         // Conserva la definición original para restaurarla al terminar.
         const originalOSDescriptor = Object.getOwnPropertyDescriptor(

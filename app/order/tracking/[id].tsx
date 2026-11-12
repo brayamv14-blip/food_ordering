@@ -12,6 +12,8 @@ import { FRESHNESS_LABEL, describeAge, locationFreshness } from "@/lib/domain/co
 import { getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
 import { MapData, MapMarker } from "@/lib/domain/geo";
 import { getRestaurant } from "@/lib/domain/restaurant";
+import { fractionAlongSegment, pointAlongRoute } from "@/lib/domain/polyline";
+import { isDemoAutopilotEnabled } from "@/lib/services/payments.service";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
 
 const TrackingScreen = () => {
@@ -19,9 +21,23 @@ const TrackingScreen = () => {
     const user = useAuthStore((s) => s.user);
     const { order, loading, error, stale } = useOrderTracking(id, user?.accountId ?? user?.$id);
 
-    const driver = order?.driverLocation ?? null;
+    const rawDriver = order?.driverLocation ?? null;
     const destination = order?.deliveryLocation ?? null;
-    const route = useRoute(driver, destination);
+    // MODO DEMO: el servidor mueve al repartidor ficticio en linea recta; aqui se ajusta a la ruta por calles restaurante -> cliente.
+    // Mismo origen que usa el servidor: restaurante configurado, o (sin configurar) ~1.5 km al suroeste del cliente.
+    const restaurantLoc = useMemo(
+        () => getRestaurant()?.location ?? (destination ? { latitude: destination.latitude - 0.012, longitude: destination.longitude - 0.012 } : null),
+        [destination]
+    );
+    const isDemoTrip = isDemoAutopilotEnabled() && !!order?.driverName?.includes("(demo)") && order?.rawStatus === "on_the_way";
+    const demoRoute = useRoute(isDemoTrip ? restaurantLoc : null, isDemoTrip ? destination : null);
+    const driver = useMemo(() => {
+        if (!rawDriver || !isDemoTrip || !restaurantLoc || !destination || !demoRoute?.ok) return rawDriver;
+        const snapped = pointAlongRoute(demoRoute.points, fractionAlongSegment(restaurantLoc, destination, rawDriver));
+        return snapped ?? rawDriver;
+    }, [rawDriver, isDemoTrip, restaurantLoc, destination, demoRoute]);
+    const realRoute = useRoute(isDemoTrip ? null : driver, destination);
+    const route = isDemoTrip ? demoRoute : realRoute;
     const lastUpdate = useMemo(() => describeAge(order?.driverUpdatedAt), [order?.driverUpdatedAt]);
     // Se recalcula cada 30 s para que "actualizada" pase a "antigua" aunque no lleguen datos nuevos.
     const [now, setNow] = useState(() => new Date());

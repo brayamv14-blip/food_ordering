@@ -7,7 +7,6 @@ import {
     client,
     databases
 } from "@/lib/appwrite";
-import { Platform } from "react-native";
 
 import { CartItemType } from "@/type";
 import { DeliveryAddress, validateDeliveryAddress } from "@/lib/domain/address";
@@ -138,6 +137,12 @@ export async function createOrderIdempotent(
             ...(result.paymentMethod === "online" || result.paymentMethod === "cash_on_delivery" ? { paymentMethod: result.paymentMethod } : {}),
             ...(typeof result.checkoutUrl === "string" ? { checkoutUrl: result.checkoutUrl } : {})
         };
+    }
+
+    // V12: en un build de produccion NUNCA se escribe directo en las tablas (el cliente podria fijar precios/estados).
+    // Si falta la Function create-order, se falla de forma explicita en vez de degradar a escritura directa.
+    if (typeof __DEV__ !== "undefined" && !__DEV__) {
+        throw new OrderServiceError("backend_missing", "Falta configurar el servidor de pedidos (EXPO_PUBLIC_FN_CREATE_ORDER). Contacta al administrador.");
     }
 
     // ---- Modo desarrollo: escritura directa --------------------------------
@@ -273,23 +278,26 @@ export async function cancelMyOrder(order: Pick<Order, "id" | "status">): Promis
     await cancelOrder(order.id);
 }
 /**
- * Realtime en web; consulta periódica en Android/iOS.
- * El observador de pedidos realiza consultas de respaldo cada 10 segundos.
+ * Seguimiento del pedido: Appwrite Realtime (WebSocket) en web, Android e iOS.
+ * V13: se activo tambien en nativo, PERO no esta verificado en un dispositivo real. El observador
+ * mantiene SIEMPRE una consulta de respaldo cada 10 s, asi que si Realtime falla (o la red lo corta)
+ * el seguimiento sigue funcionando por consulta periodica.
  */
 
 export function subscribeToOrder(
     orderId: string,
     onEvent: () => void
 ): (() => void) | undefined {
-    // En Android e iOS se utiliza el sondeo periódico del observador.
-    if (Platform.OS !== "web") {
+    try {
+        const channel = Channel.tablesdb(DB())
+            .table(ORDERS())
+            .row(orderId)
+            .toString();
+
+        return client.subscribe(channel, () => onEvent());
+    } catch (e) {
+        // Sin Realtime queda el sondeo de respaldo.
+        console.log("realtime no disponible:", e instanceof Error ? e.message : e);
         return undefined;
     }
-
-    const channel = Channel.tablesdb(DB())
-        .table(ORDERS())
-        .row(orderId)
-        .toString();
-
-    return client.subscribe(channel, () => onEvent());
 }
