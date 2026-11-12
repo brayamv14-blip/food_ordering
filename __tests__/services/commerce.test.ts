@@ -188,6 +188,7 @@ describe("creación de pedido con pago en línea", () => {
     it("envía el método de pago y devuelve el enlace; nunca envía importes", async () => {
         mockCall.mockResolvedValue({
             orderId: "o9",
+            paymentMethod: "online",
             checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_a1"
         });
 
@@ -196,6 +197,7 @@ describe("creación de pedido con pago en línea", () => {
         expect(r).toEqual({
             orderId: "o9",
             duplicate: false,
+            paymentMethod: "online",
             checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_a1"
         });
 
@@ -214,12 +216,29 @@ describe("creación de pedido con pago en línea", () => {
     });
 
     it("un enlace que no sea texto se ignora", async () => {
-        mockCall.mockResolvedValue({ orderId: "o9", checkoutUrl: 5 });
+        mockCall.mockResolvedValue({ orderId: "o9", paymentMethod: "online", checkoutUrl: 5 });
 
         expect(await createOrderIdempotent({ ...base, paymentMethod: "online" }))
-            .toEqual({ orderId: "o9", duplicate: false });
+            .toEqual({ orderId: "o9", duplicate: false, paymentMethod: "online" });
 
         expect(OrderServiceError).toBeDefined();
+    });
+
+    it("si se pidió pago en línea y el servidor guardó efectivo (función desactualizada), falla con backend_outdated", async () => {
+        mockCall.mockResolvedValue({ orderId: "o9abcdef", paymentMethod: "cash_on_delivery" });
+        await expect(createOrderIdempotent({ ...base, paymentMethod: "online" }))
+            .rejects.toMatchObject({ code: "backend_outdated" });
+
+        // Una respuesta antigua sin el campo también se detecta (no se da por buena en silencio).
+        mockCall.mockResolvedValue({ orderId: "o9abcdef" });
+        await expect(createOrderIdempotent({ ...base, paymentMethod: "online" }))
+            .rejects.toMatchObject({ code: "backend_outdated" });
+    });
+
+    it("el pago en efectivo no exige confirmar método en línea", async () => {
+        mockCall.mockResolvedValue({ orderId: "o1", paymentMethod: "cash_on_delivery" });
+        expect(await createOrderIdempotent({ ...base, paymentMethod: "cash_on_delivery" }))
+            .toEqual({ orderId: "o1", duplicate: false, paymentMethod: "cash_on_delivery" });
     });
 });
 

@@ -1,4 +1,4 @@
-import { describeAge, parseLatLng, toFiniteNumber } from "@/lib/domain/coordinates";
+import { describeAge, locationFreshness, parseLatLng, toFiniteNumber } from "@/lib/domain/coordinates";
 import { mapOrderRow, parseExtras } from "@/lib/domain/order";
 
 describe("coordenadas", () => {
@@ -58,5 +58,16 @@ describe("mapeo de pedidos", () => {
         expect(o.driverName).toBeNull();
         expect(o.total).toBe(0);
         expect(o.items).toEqual([]);
+    });
+});
+
+describe("frescura de la ubicación del repartidor", () => {
+    const now = new Date("2026-10-20T12:00:00Z");
+    it("distingue actualizada, antigua y no disponible", () => {
+        expect(locationFreshness("2026-10-20T11:59:30Z", true, now)).toBe("live");
+        expect(locationFreshness("2026-10-20T11:57:59Z", true, now)).toBe("stale");
+        expect(locationFreshness("2026-10-20T11:59:30Z", false, now)).toBe("unavailable");
+        expect(locationFreshness(null, true, now)).toBe("unavailable");
+        expect(locationFreshness("basura", true, now)).toBe("unavailable");
     });
 });

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
@@ -8,10 +8,12 @@ import LeafletMap from "@/components/LeafletMap";
 import useAuthStore from "@/store/auth.store";
 import { useOrderTracking } from "@/hooks/useOrderTracking";
 import { useRoute } from "@/hooks/useRoute";
-import { describeAge } from "@/lib/domain/coordinates";
+import { FRESHNESS_LABEL, describeAge, locationFreshness } from "@/lib/domain/coordinates";
 import { getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
 import { MapData, MapMarker } from "@/lib/domain/geo";
 import { getRestaurant } from "@/lib/domain/restaurant";
+import { fractionAlongSegment, pointAlongRoute } from "@/lib/domain/polyline";
+import { isDemoAutopilotEnabled } from "@/lib/services/payments.service";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
 
 const TrackingScreen = () => {
@@ -19,10 +21,31 @@ const TrackingScreen = () => {
     const user = useAuthStore((s) => s.user);
     const { order, loading, error, stale } = useOrderTracking(id, user?.accountId ?? user?.$id);
 
-    const driver = order?.driverLocation ?? null;
+    const rawDriver = order?.driverLocation ?? null;
     const destination = order?.deliveryLocation ?? null;
-    const route = useRoute(driver, destination);
+    // MODO DEMO: el servidor mueve al repartidor ficticio en linea recta; aqui se ajusta a la ruta por calles restaurante -> cliente.
+    // Mismo origen que usa el servidor: restaurante configurado, o (sin configurar) ~1.5 km al suroeste del cliente.
+    const restaurantLoc = useMemo(
+        () => getRestaurant()?.location ?? (destination ? { latitude: destination.latitude - 0.012, longitude: destination.longitude - 0.012 } : null),
+        [destination]
+    );
+    const isDemoTrip = isDemoAutopilotEnabled() && !!order?.driverName?.includes("(demo)") && order?.rawStatus === "on_the_way";
+    const demoRoute = useRoute(isDemoTrip ? restaurantLoc : null, isDemoTrip ? destination : null);
+    const driver = useMemo(() => {
+        if (!rawDriver || !isDemoTrip || !restaurantLoc || !destination || !demoRoute?.ok) return rawDriver;
+        const snapped = pointAlongRoute(demoRoute.points, fractionAlongSegment(restaurantLoc, destination, rawDriver));
+        return snapped ?? rawDriver;
+    }, [rawDriver, isDemoTrip, restaurantLoc, destination, demoRoute]);
+    const realRoute = useRoute(isDemoTrip ? null : driver, destination);
+    const route = isDemoTrip ? demoRoute : realRoute;
     const lastUpdate = useMemo(() => describeAge(order?.driverUpdatedAt), [order?.driverUpdatedAt]);
+    // Se recalcula cada 30 s para que "actualizada" pase a "antigua" aunque no lleguen datos nuevos.
+    const [now, setNow] = useState(() => new Date());
+    useEffect(() => {
+        const t = setInterval(() => setNow(new Date()), 30_000);
+        return () => clearInterval(t);
+    }, []);
+    const freshness = locationFreshness(order?.driverUpdatedAt, !!driver, now);
 
     // Solo puntos reales: el destino del pedido y la última ubicación que el repartidor sí compartió.
     const mapData = useMemo<MapData>(() => {
@@ -98,6 +121,14 @@ const TrackingScreen = () => {
                 <Text className="small-regular text-gray-200 mt-1">
                     Última ubicación: {lastUpdate ?? "sin datos todavía"}
                 </Text>
+                {isTrackable(order.status) && (
+                    <Text
+                        className={`small-regular mt-1 ${freshness === "live" ? "text-green-600" : freshness === "stale" ? "text-amber-600" : "text-gray-200"}`}
+                        accessibilityLiveRegion="polite"
+                    >
+                        {FRESHNESS_LABEL[freshness]}
+                    </Text>
+                )}
                 {route?.ok && route.durationSeconds !== null && (
                     <Text className="small-regular text-gray-200 mt-1">
                         Ruta por calles: ~{Math.max(1, Math.round(route.durationSeconds / 60))} min

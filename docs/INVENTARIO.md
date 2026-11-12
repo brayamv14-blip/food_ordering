@@ -1,26 +1,29 @@
-# Inventario de funcionalidades (estado real)
+# Inventario y estado real de funcionalidades (v8)
 
-**Implementado y con pruebas automatizadas (Jest/smoke test con servicios simulados)**
-- Registro, inicio/cierre de sesión, recuperación de contraseña, perfil y direcciones (con coordenadas reales vía mapa/GPS).
-- Menú, búsqueda, filtros, extras, carrito; el servidor recalcula precios y valida artículos.
-- Pedido con idempotencia, historial, detalle, cancelación según etapa (cliente: solo pendiente; pagado → lo cancela el personal con reembolso).
-- Cobertura de entrega opcional por radio (servidor).
-- Stripe Checkout (sesión por servidor, webhook firmado, `syncPayment`, `payOrder`, reembolsos, pago tardío, idempotencia).
-- Push: destino FCM nativo en Appwrite Messaging; eventos de pedido y pago; foreground/tap; token renovado.
-- Mapa Leaflet/Geoapify: selección de dirección, seguimiento con ubicación real del repartidor, ruta, marcador del restaurante (opcional).
-- Repartidor: entregas activas, compartir ubicación (solo con pedido en camino, primer plano), navegación externa a restaurante/cliente, historial, marcar en camino/entregado.
-- Personal: lista/filtros, asignar repartidor, cambiar estado, historial de eventos.
+## Reglas de inventario (servidor)
+- `menu.stock` (entero ≥ 0). **Vacío/null = el producto no controla existencias** (comportamiento anterior). Umbral de alerta: `menu.lowStockThreshold` (por omisión 5).
+- Todo el control exige `INVENTORY_MOVES_TABLE_ID` en las Functions; sin ella queda **desactivado** (nada se descuenta).
+- **Reserva al crear el pedido** (efectivo o en línea): descuento atómico con `decrementRowColumn(min: 0)`; si otra compra se llevó la última unidad, el pedido se deshace y responde `409 insufficient_stock`.
+- **Liberación** (se devuelve el stock): al **cancelar** (cliente pendiente, personal; un reembolso siempre implica cancelar) y cuando la **sesión de pago vence sin cobro** (el webhook cancela el pedido pendiente sin pagar).
+- **No** devuelven stock: entregado, entrega fallida, repartidor que rechaza.
+- Estados: pedido en línea sin pagar → mantiene la reserva hasta pagar/vencer/cancelar (tope de 5 sin pagar por usuario). Pago pendiente/fallido → mantiene la reserva (se puede reintentar). Reembolso hecho desde el panel de Stripe sin cancelar el pedido → **no** libera stock (el personal debe cancelar).
+- **Idempotencia:** cada movimiento tiene `rowId` determinista (hash de `r|x:pedido:producto`); Appwrite rechaza ids repetidos (409), por lo que reservar/devolver dos veces es imposible. Si devolver falla, no queda constancia y se reintenta.
+- **Historial:** tabla `inventory_movements` (reserve, release, adjust, initial). Sin permisos de cliente.
+- **Alertas:** al cruzar el umbral se envía push al personal/admin y la lista de productos marca “bajas”.
 
-**Incompleto (existe parte, falta algo)**
-- Ubicación del repartidor solo en primer plano (no hay seguimiento en segundo plano; requeriría permiso y servicio nativo adicionales).
-- Panel de personal: pedidos y asignación sí; **no** hay CRUD de productos/categorías/usuarios, reportes ni historial de pagos en la app (se gestionan en la consola de Appwrite / Stripe Dashboard).
+## Estado de funcionalidades
+**Completo en código y probado con dobles (smoke 237 + Jest)**: cuenta, menú, carrito, pedidos idempotentes, cobertura, Stripe (servidor, webhook, reembolsos, tardíos, vencidas), push por evento, seguimiento con frescura de ubicación, ciclo de repartidor completo (disponibilidad, aceptar/rechazar, recogido, en camino, entrega fallida/reintento, historial, autoasignación opcional), panel de pedidos, **admin: productos, stock, usuarios/roles, pagos, reportes**.
 
-**Ausente (no implementado; requiere cambios de modelo de datos y de máquina de estados)**
-- Estado "recogido", aceptar/rechazar asignación, disponibilidad del repartidor y asignación automática ("listo para recoger" y "entrega fallida" se agregaron en v7).
-- Cupones, múltiples restaurantes, reembolsos parciales, reportes/indicadores.
+**Parcial**: ubicación solo en primer plano; el panel de categorías es de solo selección; reportes limitados a 2,000 pedidos.
 
-**Bloqueado por configuración externa (no verificable aquí)**
-- Entrega real de push (Firebase + clave de servicio en el proveedor de Appwrite + build de desarrollo + teléfono).
-- Cobro de prueba real, webhook registrado en Stripe, `PAYMENT_RETURN_URL` publicada en https.
-- Mapa/rutas con la clave de Geoapify en dispositivo.
-- Despliegue de las 3 Functions y migración del esquema en tu Appwrite.
+**Ausente**: cierres de caja, variantes con stock, cupones, reembolsos parciales, múltiples restaurantes, ubicación en segundo plano.
+
+**Bloqueado por infraestructura (no verificado aquí)**: Appwrite real, Stripe real (modo prueba), Firebase/FCM, GPS en teléfono, `npm install`/Jest/tsc/expo-doctor (ver `AUDITORIA-v8.md`).
+
+## v9
+
+- `stockOf`: valores negativos cuentan como 0 (agotado), nunca como «sin control».
+- El descuento ya no depende de `min`: se valida el valor devuelto y se compensa si es negativo.
+- `orders.stockReserved` indica si el pedido reservó stock; cancelar/expirar/reembolsar solo devuelve si es `true` y se niega (503) si la función no puede devolver.
+- `reconcileInventory` (admin-api, solo admin): devuelve stock de pedidos cancelados y de reservas huérfanas; idempotente.
+- `INVENTORY_MOVES_TABLE_ID` y `MENU_TABLE_ID` deben estar en las cuatro funciones o en ninguna.

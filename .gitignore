@@ -48,3 +48,7 @@ app-example
 !.env.example
 *.keystore
 android/app/google-services.json
+
+# Archivos generados localmente
+coverage/
+create-order.tar.gz

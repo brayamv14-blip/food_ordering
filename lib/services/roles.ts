@@ -1,8 +1,11 @@
 import { account } from "@/lib/appwrite";
 
 export interface Roles {
+    /** Personal del restaurante (incluye a los administradores). */
     staff: boolean;
     driver: boolean;
+    /** Administrador: ademas gestiona productos, precios y roles. */
+    admin: boolean;
 }
 
 /**
@@ -12,7 +15,8 @@ export interface Roles {
  */
 export const rolesFromLabels = (labels: unknown): Roles => {
     const list = Array.isArray(labels) ? labels : [];
-    return { staff: list.includes("staff"), driver: list.includes("driver") };
+    const admin = list.includes("admin");
+    return { staff: admin || list.includes("staff"), driver: list.includes("driver"), admin };
 };
 
 export async function getMyRoles(): Promise<Roles> {
@@ -20,6 +24,6 @@ export async function getMyRoles(): Promise<Roles> {
         const me = await account.get();
         return rolesFromLabels((me as { labels?: unknown }).labels);
     } catch {
-        return { staff: false, driver: false };
+        return { staff: false, driver: false, admin: false };
     }
 }

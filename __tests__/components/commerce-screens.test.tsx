@@ -81,7 +81,9 @@ jest.mock("@/lib/services/payments.service", () => ({
     isOnlinePaymentEnabled: () => mockEnabled(),
     openCheckout: (...args: any[]) => mockOpen(...args),
     requestPaymentUrl: (...args: any[]) => mockRequestUrl(...args),
-    syncPayment: (...args: any[]) => mockSync(...args)
+    syncPayment: (...args: any[]) => mockSync(...args),
+    isDemoAutopilotEnabled: () => false,
+    advanceDemo: jest.fn()
 }));
 
 const mockReorder = jest.fn();
@@ -156,6 +158,8 @@ const order = (overrides: any = {}) => ({
     driverName: null,
     driverLocation: null,
     driverUpdatedAt: null,
+    receivedAt: null,
+    refundedAmount: 0,
     items: [
         {
             id: "i1",

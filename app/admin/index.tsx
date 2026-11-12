@@ -14,6 +14,11 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import OrderStatusBadge from "@/components/OrderStatusBadge";
+import ReasonModal from "@/components/ReasonModal";
+import LeafletMap from "@/components/LeafletMap";
+import { FRESHNESS_LABEL, describeAge, locationFreshness } from "@/lib/domain/coordinates";
+import { MapData, MapMarker } from "@/lib/domain/geo";
+import { getRestaurant } from "@/lib/domain/restaurant";
 import {
     DATE_PRESETS,
     DatePreset,
@@ -31,6 +36,8 @@ import {
 import { formatMoney } from "@/lib/domain/pricing";
 import { getMyRoles } from "@/lib/services/roles";
 import {
+    DRIVER_STATUS_COLOR,
+    DRIVER_STATUS_LABEL,
     DriverOption,
     OrderEvent,
     StaffOrder,
@@ -46,7 +53,13 @@ import {
 const EVENT_LABELS: Record<string, string> = {
     created: "Pedido creado",
     status: "Cambio de estado",
-    driver_assigned: "Repartidor asignado"
+    driver_assigned: "Repartidor asignado",
+    driver_claimed: "Repartidor tomó el pedido",
+    picked_up: "Pedido recogido",
+    received: "Cliente confirmó recepción",
+    customer_issue: "Problema reportado por el cliente",
+    driver_rejected: "Repartidor rechazó",
+    refund: "Reembolso"
 };
 const ROLE_LABELS: Record<string, string> = { customer: "cliente", staff: "personal", driver: "repartidor" };
 
@@ -68,6 +81,8 @@ const AdminOrders = () => {
     const [error, setError] = useState<string | null>(null);
     const [busyId, setBusyId] = useState<string | null>(null);
     const [pickFor, setPickFor] = useState<StaffOrder | null>(null);
+    const [mapOrder, setMapOrder] = useState<StaffOrder | null>(null);
+    const [mapRefreshing, setMapRefreshing] = useState(false);
     const [history, setHistory] = useState<{ order: StaffOrder; events: OrderEvent[] | null; enabled: boolean; error?: string } | null>(null);
     // Evita que una respuesta lenta pise a otra mas reciente.
     const requestSeq = useRef(0);
@@ -125,12 +140,46 @@ const AdminOrders = () => {
         }
     };
 
+    const [cancelFor, setCancelFor] = useState<StaffOrder | null>(null);
+
     const confirmAction = (order: StaffOrder, to: OrderStatus, label: string, destructive: boolean) => {
+        // Cancelar exige motivo (se guarda en el historial y el servidor lo valida).
+        if (to === "cancelled") {
+            setCancelFor(order);
+            return;
+        }
         const go = () => run(order.id, () => changeOrderStatus(order.id, to, { expectedStatus: order.status, expectedUpdatedAt: order.updatedAt }));
         Alert.alert(label, destructive ? "Esta acción no se puede deshacer." : `¿Confirmas “${label}” para el pedido #${order.id.slice(-6)}?`, [
             { text: "No", style: "cancel" },
             { text: "Sí", style: destructive ? "destructive" : "default", onPress: go }
         ]);
+    };
+
+    // Mapa de seguimiento (admin/personal): solo puntos reales; el repartidor aparece si compartio ubicacion.
+    const mapData = ((): MapData => {
+        const markers: MapMarker[] = [];
+        const restaurant = getRestaurant();
+        if (restaurant) markers.push({ id: "rest", kind: "restaurant", position: restaurant.location, label: restaurant.name });
+        if (mapOrder && typeof mapOrder.deliveryLatitude === "number" && typeof mapOrder.deliveryLongitude === "number") {
+            markers.push({ id: "dest", kind: "destination", position: { latitude: mapOrder.deliveryLatitude, longitude: mapOrder.deliveryLongitude }, label: "Destino" });
+        }
+        if (mapOrder && typeof mapOrder.driverLatitude === "number" && typeof mapOrder.driverLongitude === "number") {
+            markers.push({ id: "drv", kind: "driver", position: { latitude: mapOrder.driverLatitude, longitude: mapOrder.driverLongitude }, label: mapOrder.driverName ?? "Repartidor" });
+        }
+        return { markers, route: [] };
+    })();
+
+    const refreshMapOrder = async () => {
+        if (!mapOrder) return;
+        setMapRefreshing(true);
+        try {
+            const fresh = (await listStaffOrders({ status: mapOrder.status as OrderStatus })).find((o) => o.id === mapOrder.id);
+            if (fresh) setMapOrder(fresh);
+        } catch {
+            /* se conserva la última ubicación conocida */
+        } finally {
+            setMapRefreshing(false);
+        }
     };
 
     const openHistory = async (order: StaffOrder) => {
@@ -260,6 +309,11 @@ const AdminOrders = () => {
                                             <Text className="font-semibold text-primary">{o.driverUserId ? "Cambiar" : "Asignar"}</Text>
                                         </TouchableOpacity>
                                     )}
+                                    {["picked_up", "on_the_way"].includes(o.status) && (
+                                        <TouchableOpacity onPress={() => setMapOrder(o)} className="mr-4" accessibilityLabel={`Ver mapa del pedido ${o.id.slice(-6)}`}>
+                                            <Text className="font-semibold text-primary">Mapa</Text>
+                                        </TouchableOpacity>
+                                    )}
                                     <TouchableOpacity onPress={() => openHistory(o)} accessibilityLabel={`Ver historial del pedido ${o.id.slice(-6)}`}>
                                         <Text className="font-semibold text-gray-400">Historial</Text>
                                     </TouchableOpacity>
@@ -290,6 +344,20 @@ const AdminOrders = () => {
                 }}
             />
 
+            <ReasonModal
+                visible={!!cancelFor}
+                title="Motivo de la cancelación"
+                options={["Cliente lo pidió", "Sin stock", "Dirección fuera de cobertura", "Pago no válido"]}
+                confirmLabel="Cancelar pedido"
+                destructive
+                onClose={() => setCancelFor(null)}
+                onConfirm={(reason) => {
+                    const o = cancelFor!;
+                    setCancelFor(null);
+                    run(o.id, () => changeOrderStatus(o.id, "cancelled", { expectedStatus: o.status, expectedUpdatedAt: o.updatedAt }, reason));
+                }}
+            />
+
             <Modal visible={!!pickFor} transparent animationType="slide" onRequestClose={() => setPickFor(null)}>
                 <View className="flex-1 justify-end bg-black/40">
                     <View className="rounded-t-3xl bg-white p-5 pb-10">
@@ -312,11 +380,39 @@ const AdminOrders = () => {
                                 }}
                                 className="border-b border-gray-100 py-4"
                             >
-                                <Text className="text-base text-dark-100">{d.name}</Text>
+                                <View className="flex-row items-center justify-between">
+                                    <Text className="text-base text-dark-100">{d.name}</Text>
+                                    <Text style={{ color: DRIVER_STATUS_COLOR[d.status ?? "offline"] }} className="text-xs font-semibold">
+                                        {DRIVER_STATUS_LABEL[d.status ?? "offline"]} · {d.activeOrders ?? 0} activo(s)
+                                    </Text>
+                                </View>
                             </TouchableOpacity>
                         ))}
                         <TouchableOpacity onPress={() => setPickFor(null)} className="mt-4 items-center py-3">
                             <Text className="font-semibold text-gray-400">Cerrar</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
+
+            <Modal visible={!!mapOrder} animationType="slide" onRequestClose={() => setMapOrder(null)}>
+                <View className="flex-1 bg-white">
+                    <View className="flex-row items-center justify-between px-5 pb-3 pt-12">
+                        <Text className="text-lg font-bold text-dark-100">Seguimiento #{mapOrder?.id.slice(-6)}</Text>
+                        <TouchableOpacity onPress={() => setMapOrder(null)} accessibilityLabel="Cerrar mapa">
+                            <Text className="font-semibold text-primary">Cerrar</Text>
+                        </TouchableOpacity>
+                    </View>
+                    <LeafletMap data={mapData} style={{ flex: 1 }} />
+                    <View className="px-5 py-4">
+                        <Text className="text-sm text-gray-400">
+                            Repartidor: <Text className="font-semibold text-dark-100">{mapOrder?.driverName ?? "sin asignar"}</Text>
+                            {" · "}
+                            {FRESHNESS_LABEL[locationFreshness(mapOrder?.driverUpdatedAt, typeof mapOrder?.driverLatitude === "number")]}
+                            {describeAge(mapOrder?.driverUpdatedAt) ? ` (${describeAge(mapOrder?.driverUpdatedAt)})` : ""}
+                        </Text>
+                        <TouchableOpacity onPress={refreshMapOrder} disabled={mapRefreshing} className="mt-3 items-center rounded-xl bg-primary py-3">
+                            {mapRefreshing ? <ActivityIndicator color="#FFFFFF" /> : <Text className="font-bold text-white">Actualizar ubicación</Text>}
                         </TouchableOpacity>
                     </View>
                 </View>
@@ -344,6 +440,7 @@ const AdminOrders = () => {
                                         {e.type === "status" && e.to ? `: ${getStatusMeta(e.from).label} → ${getStatusMeta(e.to).label}` : ""}
                                     </Text>
                                     <Text className="text-xs text-gray-400">{new Date(e.at).toLocaleString("es-MX")} · {ROLE_LABELS[e.actorRole ?? ""] ?? "sistema"}</Text>
+                                    {!!e.note && <Text className="text-xs text-dark-100">Motivo: {e.note}</Text>}
                                 </View>
                             )}
                         />

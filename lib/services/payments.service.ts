@@ -42,6 +42,10 @@ export async function syncPayment(orderId: string): Promise<PaymentSync> {
     if (!res || typeof res.paymentStatus !== "string") {
         throw new PaymentError("bad_response", "Respuesta incompleta del servidor.");
     }
+    // Modo demostracion: al confirmarse el pago, arranca la simulacion sin esperar a abrir el seguimiento.
+    if (res.paymentStatus === "paid" && isDemoAutopilotEnabled()) {
+        try { await advanceDemo(orderId); } catch { /* mejor esfuerzo */ }
+    }
     return res;
 }
 
@@ -57,4 +61,23 @@ export async function requestPaymentUrl(orderId: string): Promise<string> {
         throw new PaymentError("untrusted_url", "El enlace de pago no es válido.");
     }
     return res.checkoutUrl;
+}
+
+/** MODO DEMOSTRACION: solo si EXPO_PUBLIC_DEMO_AUTOPILOT="true" (y la Function tiene DEMO_AUTOPILOT=true). */
+export const isDemoAutopilotEnabled = (): boolean => process.env.EXPO_PUBLIC_DEMO_AUTOPILOT === "true";
+
+export interface DemoAdvance {
+    status: string;
+    advanced?: boolean;
+    done?: boolean;
+    waiting?: string;
+}
+
+/** Pide al servidor avanzar la simulacion un paso (repartidor ficticio incluido). Nunca decide el cliente. */
+export async function advanceDemo(orderId: string): Promise<DemoAdvance> {
+    const fn = appwriteConfig.functions.updateOrderStatus;
+    if (!fn) throw new PaymentError("not_configured", "Falta configurar EXPO_PUBLIC_FN_UPDATE_ORDER_STATUS.");
+    const res = await callBackendFunction<DemoAdvance>(fn, { action: "advanceDemo", orderId });
+    if (!res || typeof res.status !== "string") throw new PaymentError("bad_response", "Respuesta incompleta del servidor.");
+    return res;
 }

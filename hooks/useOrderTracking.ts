@@ -4,6 +4,7 @@ import { Order } from "@/lib/domain/order";
 import { isTerminalStatus } from "@/lib/domain/orderStatus";
 import { startOrderWatcher } from "@/lib/domain/orderWatcher";
 import { fetchOrder, subscribeToOrder } from "@/lib/services/orders.service";
+import { advanceDemo, isDemoAutopilotEnabled } from "@/lib/services/payments.service";
 
 export interface OrderTrackingState {
     order: Order | null;
@@ -52,7 +53,30 @@ export function useOrderTracking(orderId: string | undefined, userId?: string): 
                 }))
         });
 
-        return () => watcher.stop();
+        // MODO DEMOSTRACION (apagado por omision): cada 4 s pide al servidor avanzar la simulacion y refresca.
+        let demoTimer: ReturnType<typeof setInterval> | null = null;
+        if (isDemoAutopilotEnabled()) {
+            let busy = false;
+            demoTimer = setInterval(async () => {
+                if (busy) return;
+                busy = true;
+                try {
+                    const r = await advanceDemo(orderId);
+                    if (r.done && demoTimer) clearInterval(demoTimer);
+                    const fresh = await fetchOrder(orderId, userId);
+                    setState({ order: fresh, loading: false, error: null, stale: false });
+                } catch {
+                    /* mejor esfuerzo: el siguiente ciclo reintenta */
+                } finally {
+                    busy = false;
+                }
+            }, 4000);
+        }
+
+        return () => {
+            watcher.stop();
+            if (demoTimer) clearInterval(demoTimer);
+        };
     }, [orderId, userId]);
 
     return state;

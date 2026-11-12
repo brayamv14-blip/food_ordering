@@ -7,6 +7,8 @@ import { Ionicons } from "@expo/vector-icons";
 import useAuthStore from "@/store/auth.store";
 import { useOrderTracking } from "@/hooks/useOrderTracking";
 import { cancelMyOrder } from "@/lib/services/orders.service";
+import { confirmReceipt, describeBackendError, reportOrderIssue } from "@/lib/services/staff.service";
+import ReasonModal from "@/components/ReasonModal";
 import { canCustomerCancel, getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
 import { formatMoney } from "@/lib/domain/pricing";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
@@ -20,6 +22,11 @@ const OrderDetail = () => {
     const user = useAuthStore((s) => s.user);
     const { order, loading, error, stale } = useOrderTracking(id, user?.accountId ?? user?.$id);
     const [cancelling, setCancelling] = useState(false);
+    const [confirming, setConfirming] = useState(false);
+    const [receivedLocal, setReceivedLocal] = useState<string | null>(null);
+    const [issueOpen, setIssueOpen] = useState(false);
+    const [reporting, setReporting] = useState(false);
+    const [reported, setReported] = useState(false);
 
     const handleCancel = () => {
         if (!order || cancelling) return;
@@ -41,6 +48,34 @@ const OrderDetail = () => {
                 }
             }
         ]);
+    };
+
+    // La confirmación y el reporte los registra el servidor (el cliente no puede escribir esos campos).
+    const handleConfirmReceipt = async () => {
+        if (!order || confirming) return;
+        setConfirming(true);
+        try {
+            setReceivedLocal((await confirmReceipt(order.id)) ?? new Date().toISOString());
+        } catch (e) {
+            Alert.alert("No se pudo confirmar", describeBackendError(e));
+        } finally {
+            setConfirming(false);
+        }
+    };
+
+    const handleReport = async (reason: string) => {
+        if (!order) return;
+        setReporting(true);
+        try {
+            await reportOrderIssue(order.id, reason);
+            setReported(true);
+            setIssueOpen(false);
+            Alert.alert("Reporte enviado", "El restaurante revisará tu caso.");
+        } catch (e) {
+            Alert.alert("No se pudo enviar", describeBackendError(e));
+        } finally {
+            setReporting(false);
+        }
     };
 
     if (loading) {
@@ -155,6 +190,24 @@ const OrderDetail = () => {
                     )}
                 </View>
 
+                {order.status === "delivered" && (
+                    <View className="mt-8">
+                        {order.receivedAt || receivedLocal ? (
+                            <Text className="text-center paragraph-bold text-green-600">Recepción confirmada ✓</Text>
+                        ) : (
+                            <TouchableOpacity onPress={handleConfirmReceipt} disabled={confirming} className="rounded-full bg-primary py-4" accessibilityRole="button" accessibilityLabel="Confirmar que recibí mi pedido">
+                                {confirming ? <ActivityIndicator color="#FFFFFF" /> : <Text className="text-center paragraph-bold text-white">Confirmar que recibí mi pedido</Text>}
+                            </TouchableOpacity>
+                        )}
+                    </View>
+                )}
+
+                {(order.status === "on_the_way" || order.status === "delivered" || order.status === "delivery_failed") && (
+                    <TouchableOpacity onPress={() => setIssueOpen(true)} disabled={reported} className="mt-4 rounded-full border border-gray-200 py-4" accessibilityRole="button" accessibilityLabel="Reportar un problema con el pedido">
+                        <Text className="text-center paragraph-bold text-dark-100">{reported ? "Problema reportado" : "Reportar un problema"}</Text>
+                    </TouchableOpacity>
+                )}
+
                 {canCustomerCancel(order.status) && (
                     <TouchableOpacity
                         onPress={handleCancel}
@@ -168,6 +221,15 @@ const OrderDetail = () => {
                     </TouchableOpacity>
                 )}
             </ScrollView>
+            <ReasonModal
+                visible={issueOpen}
+                title="¿Qué pasó con tu pedido?"
+                options={["No llegó", "Llegó incompleto", "Llegó en mal estado", "Cobro incorrecto"]}
+                confirmLabel="Enviar reporte"
+                busy={reporting}
+                onConfirm={handleReport}
+                onClose={() => setIssueOpen(false)}
+            />
         </SafeAreaView>
     );
 };

@@ -60,3 +60,20 @@ export function describeAge(iso: string | null | undefined, now: Date = new Date
     if (hours < 24) return `hace ${hours} h`;
     return new Date(t).toLocaleString("es-MX");
 }
+
+/** Ubicacion del repartidor segun su antiguedad. Mas de 2 minutos sin datos ya no se considera "en vivo". */
+export const LOCATION_FRESH_MS = 2 * 60 * 1000;
+export type LocationFreshness = "live" | "stale" | "unavailable";
+
+export function locationFreshness(iso: string | null | undefined, hasPosition: boolean, now: Date = new Date()): LocationFreshness {
+    if (!hasPosition || !iso) return "unavailable";
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return "unavailable";
+    return now.getTime() - t <= LOCATION_FRESH_MS ? "live" : "stale";
+}
+
+export const FRESHNESS_LABEL: Record<LocationFreshness, string> = {
+    live: "Ubicación actualizada",
+    stale: "Ubicación antigua: el repartidor no ha enviado datos recientes",
+    unavailable: "Ubicación no disponible"
+};

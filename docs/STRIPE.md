@@ -40,3 +40,9 @@ En la app solo: `EXPO_PUBLIC_ENABLE_ONLINE_PAYMENT=true` (+ los IDs de las Funct
 
 ## Modo real
 Cambia `STRIPE_SECRET_KEY` por la `sk_live_...`, crea el webhook en modo real y actualiza `STRIPE_WEBHOOK_SECRET`. Activa la cuenta de Stripe (datos fiscales/bancarios). Prueba primero con un importe pequeño. **Rota cualquier clave que se haya compartido en chats o capturas.**
+
+## v8: conciliación con inventario
+- `checkout.session.expired` ya **no** deja el pedido pendiente: si es la sesión vigente y el pedido sigue `pending` sin pagar, se cancela (`paymentStatus=cancelled`), se **devuelve el stock** y se avisa al cliente. Una sesión vencida que ya no es la vigente (el cliente generó otra con “Pagar ahora”) se ignora.
+- Cancelar un pedido pagado: reembolso primero (idempotente `refund-<pedido>`), luego cancelación y devolución de stock una sola vez.
+- Webhook repetido: no cambia nada, no vuelve a notificar ni a mover stock.
+- Probado solo con un doble de la API de Stripe; falta la prueba real en modo prueba (ver `AUDITORIA-v8.md`, §Pruebas de aceptación).

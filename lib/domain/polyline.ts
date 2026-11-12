@@ -55,3 +55,37 @@ export function shouldRefetchRoute(
     if (now - prev.at < 10000) return false; // nunca mas de una consulta cada 10 s
     return distanceMeters(prev.origin, origin) >= minMove || now - prev.at >= minInterval;
 }
+
+/** Fraccion (0..1) que avanza `p` sobre el segmento recto a -> b (proyeccion). */
+export function fractionAlongSegment(a: LatLng, b: LatLng, p: LatLng): number {
+    const bx = b.longitude - a.longitude, by = b.latitude - a.latitude;
+    const len2 = bx * bx + by * by;
+    if (len2 === 0) return 0;
+    const t = ((p.longitude - a.longitude) * bx + (p.latitude - a.latitude) * by) / len2;
+    return Math.min(1, Math.max(0, t));
+}
+
+/** Punto situado a `fraction` (0..1) de la longitud total de una ruta por calles. */
+export function pointAlongRoute(points: LatLng[], fraction: number): LatLng | null {
+    if (points.length === 0) return null;
+    if (points.length === 1) return points[0];
+    const f = Math.min(1, Math.max(0, fraction));
+    const seg: number[] = [];
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+        const d = distanceMeters(points[i - 1], points[i]);
+        seg.push(d);
+        total += d;
+    }
+    if (total === 0) return points[0];
+    let remaining = f * total;
+    for (let i = 0; i < seg.length; i++) {
+        if (remaining <= seg[i] || i === seg.length - 1) {
+            const r = seg[i] === 0 ? 0 : Math.min(1, remaining / seg[i]);
+            const a = points[i], b = points[i + 1];
+            return { latitude: a.latitude + (b.latitude - a.latitude) * r, longitude: a.longitude + (b.longitude - a.longitude) * r };
+        }
+        remaining -= seg[i];
+    }
+    return points[points.length - 1];
+}

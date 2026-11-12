@@ -56,7 +56,6 @@
         {
             "$id": "6ab6f2e8000e2aaa09db",
             "$permissions": [
-                "create(\"any\")",
                 "read(\"any\")"
             ],
             "databaseId": "6ab6f27e000135138f89",
@@ -87,7 +86,6 @@
         {
             "$id": "6ab6f30d0011f3a49202",
             "$permissions": [
-                "create(\"any\")",
                 "read(\"any\")"
             ],
             "databaseId": "6ab6f27e000135138f89",
@@ -128,7 +126,6 @@
         {
             "$id": "6ab6f3150012494438c2",
             "$permissions": [
-                "create(\"any\")",
                 "read(\"any\")"
             ],
             "databaseId": "6ab6f27e000135138f89",
@@ -225,7 +222,6 @@
         {
             "$id": "6ab6f5020005536e0916",
             "$permissions": [
-                "create(\"any\")",
                 "read(\"any\")"
             ],
             "databaseId": "6ab6f27e000135138f89",
@@ -257,14 +253,12 @@
         {
             "$id": "6ab6f52f00317b447fbe",
             "$permissions": [
-                "create(\"any\")",
-                "read(\"any\")",
-                "update(\"any\")"
+                "create(\"users\")"
             ],
             "databaseId": "6ab6f27e000135138f89",
             "name": "users",
             "enabled": true,
-            "rowSecurity": false,
+            "rowSecurity": true,
             "columns": [
                 {
                     "key": "email",
@@ -333,15 +327,11 @@
         },
         {
             "$id": "6ab727bd00217e5c8f8d",
-            "$permissions": [
-                "create(\"any\")",
-                "read(\"any\")",
-                "update(\"any\")"
-            ],
+            "$permissions": [],
             "databaseId": "6ab6f27e000135138f89",
             "name": "orders",
             "enabled": true,
-            "rowSecurity": false,
+            "rowSecurity": true,
             "columns": [
                 {
                     "key": "userId",
@@ -402,14 +392,11 @@
         },
         {
             "$id": "6ab7281f0039efe022c2",
-            "$permissions": [
-                "create(\"any\")",
-                "read(\"any\")"
-            ],
+            "$permissions": [],
             "databaseId": "6ab6f27e000135138f89",
             "name": "order_items",
             "enabled": true,
-            "rowSecurity": false,
+            "rowSecurity": true,
             "columns": [
                 {
                     "key": "orderId",
@@ -472,7 +459,7 @@
         {
             "$id": "6ab6fa3a00059e1f950e",
             "$permissions": [
-                "create(\"any\")",
+                "create(\"users\")",
                 "read(\"any\")"
             ],
             "fileSecurity": false,

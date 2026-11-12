@@ -47,6 +47,19 @@ describe("estados del pedido", () => {
         expect(getStatusMeta("delivery_failed").label).toBe("Entrega fallida");
     });
 
+    it("\"recogido\" es un estado propio entre listo y en camino", () => {
+        expect(canTransition("ready", "picked_up")).toBe(true);
+        expect(canTransition("preparing", "picked_up")).toBe(true);
+        expect(canTransition("picked_up", "on_the_way")).toBe(true);
+        expect(canTransition("picked_up", "delivered")).toBe(false);
+        expect(canTransition("picked_up", "delivery_failed")).toBe(true); // sin callejón sin salida
+        expect(canTransition("picked_up", "cancelled")).toBe(false);
+        expect(getStatusMeta("picked_up").label).toBe("Recogido");
+        expect(getProgressIndex("picked_up")).toBe(getProgressIndex("ready"));
+        expect(isTrackable("picked_up")).toBe(false);
+        expect(canCustomerCancel("picked_up")).toBe(false);
+    });
+
     it("el cliente solo cancela pedidos pendientes", () => {
         expect(canCustomerCancel("pending")).toBe(true);
         for (const s of ["confirmed", "preparing", "ready", "on_the_way", "delivery_failed", "delivered", "cancelled", "x", null]) {

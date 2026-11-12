@@ -18,6 +18,7 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.jsm.foodordering",
+      "versionCode": 1,
       "blockedPermissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"

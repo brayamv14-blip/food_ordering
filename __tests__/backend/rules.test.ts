@@ -20,7 +20,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(d("on_the_way", "delivery_failed")).toBe(true);
         expect(d("preparing", "ready")).toBe(false); // el repartidor no marca "listo": es del restaurante
         expect(d("delivery_failed", "cancelled")).toBe(false);
-        expect(d("delivery_failed", "on_the_way")).toBe(false);
+        expect(d("delivery_failed", "on_the_way")).toBe(true); // El repartidor asignado puede reintentar.
         const s = (from: string, to: string, extra: any = {}) => rules.canActorTransition({ actor: "staff", isOwner: false, from, to, ...extra });
         expect(s("preparing", "ready").ok).toBe(true);
         expect(s("ready", "on_the_way", { hasDriver: false })).toMatchObject({ ok: false, code: "driver_required" });
@@ -100,10 +100,10 @@ describe("reglas del backend (Appwrite Functions)", () => {
         expect(rules.toStaffOrderView({ $id: "o1", deliveryLatitude: 19.4, deliveryLongitude: "x" })).toMatchObject({ deliveryLatitude: 19.4, deliveryLongitude: null });
     });
 
-    it("solo existen las tres funciones permitidas (pedidos, estados y webhook de Stripe)", () => {
+    it("solo existen las funciones previstas (pedidos, estados, webhook de Stripe y administración)", () => {
         const root = path.join(__dirname, "../../appwrite-functions");
         const dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, "src/main.js"))).map((d) => d.name).sort();
-        expect(dirs).toEqual(["create-order", "stripe-webhook", "update-order-status"]);
+        expect(dirs).toEqual(["admin-api", "create-order", "stripe-webhook", "update-order-status"]);
     });
 
     it("las copias de rules.js dentro de cada función están sincronizadas", () => {
@@ -112,7 +112,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
         const lf = (txt: string) => txt.replace(/\r\n/g, "\n");
         const shared = lf(fs.readFileSync(path.join(root, "shared/rules.js"), "utf8"));
         const expected = shared.replace(/module\.exports = \{([\s\S]*?)\};\s*$/, "export {$1};\n");
-        for (const fn of ["create-order", "update-order-status", "stripe-webhook"]) {
+        for (const fn of ["create-order", "update-order-status", "stripe-webhook", "admin-api"]) {
             const copy = lf(fs.readFileSync(path.join(root, fn, "src/rules.js"), "utf8"));
             expect(copy.endsWith(expected)).toBe(true);
         }
@@ -220,6 +220,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
         });
         it("arma la sesión de Stripe Checkout con el total del servidor (centavos, MXN)", () => {
             const params = Object.fromEntries(rules.buildCheckoutSessionParams({ orderId: "abc123456789", userId: "u1", total: 28.5, returnUrl: "https://x.io/p.html" }));
+            expect(Object.keys(params).some((k) => k.startsWith("payment_method_types"))).toBe(false); // Stripe 2026-09-30+ lo rechaza (400)
             expect(params).toMatchObject({
                 mode: "payment",
                 client_reference_id: "abc123456789",
@@ -252,6 +253,9 @@ describe("reglas del backend (Appwrite Functions)", () => {
             expect(rules.movePaymentStatus("paid", "refunded")).toMatchObject({ ok: true, changed: true });
             expect(rules.movePaymentStatus("refunded", "refunded")).toMatchObject({ ok: true, changed: false });
             expect(rules.movePaymentStatus("refunded", "paid").ok).toBe(false);
+            // v9: un reembolso que llega antes que el "pagado" deja el pago reembolsado y el pagado tardío no lo revierte
+            expect(rules.movePaymentStatus("pending", "refunded")).toMatchObject({ ok: true, changed: true });
+            expect(rules.movePaymentStatus("failed", "refunded")).toMatchObject({ ok: true, changed: true });
             expect(rules.movePaymentStatus("paid", "pending").ok).toBe(false);
             expect(rules.movePaymentStatus("not_required", "paid").ok).toBe(false);
         });
@@ -273,7 +277,7 @@ describe("reglas del backend (Appwrite Functions)", () => {
             expect(rules.stripeEventToPayment(ev("checkout.session.async_payment_failed", { client_reference_id: "o1" }))).toMatchObject({ kind: "failed" });
             expect(rules.stripeEventToPayment(ev("checkout.session.expired", { client_reference_id: "o1" }))).toMatchObject({ kind: "expired" });
             expect(rules.stripeEventToPayment(ev("charge.refunded", { refunded: true, metadata: { orderId: "o1" } }))).toMatchObject({ kind: "refunded", orderId: "o1" });
-            expect(rules.stripeEventToPayment(ev("charge.refunded", { amount: 100, amount_refunded: 50, metadata: { orderId: "o1" } }))).toBeNull(); // parcial
+            expect(rules.stripeEventToPayment(ev("charge.refunded", { amount: 100, amount_refunded: 50, metadata: { orderId: "o1" } }))).toMatchObject({ kind: "partial_refund", orderId: "o1" }); // parcial: no cambia el estado del pago
             expect(rules.stripeEventToPayment(ev("customer.created", {}))).toBeNull();
             expect(rules.stripeEventToPayment(null)).toBeNull();
         });

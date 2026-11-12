@@ -93,3 +93,16 @@ Esto no confirma todavía el funcionamiento de los servicios reales, la instalac
 
 ## Novedades v7
 Estados `ready` y `delivery_failed`, tope de pedidos en línea sin pagar, `scripts/verify-appwrite.mjs` (auditoría de solo lectura) y `docs/AUDITORIA-v7.md` (matriz). Migración: solo el índice `idx_status` (ver `docs/APPWRITE.md`).
+
+## Novedades v8
+Inventario real, ciclo completo del repartidor, panel de administración (`admin-api`), conciliación Stripe↔stock y seguimiento con frescura de ubicación. Lee `docs/AUDITORIA-v8.md` (matriz, pruebas reales, bloqueos y pasos de aplicación) y `docs/ADMIN.md`. **v8 reemplaza a v7** (es acumulativo contra v6).
+
+## 3. Novedades v9 (acumulado sobre v6)
+
+Lee `docs/AUDITORIA-v9.md`, `docs/DEPLOYMENT-v9.md`, `docs/MATRIZ-PRUEBAS-v9.md` y `docs/BLOQUEOS-PRODUCCION-v9.md` antes de desplegar.
+
+- Inventario: sin depender de `min` de Appwrite; negativos = agotado; campo `orders.stockReserved`; acción admin `reconcileInventory`.
+- Pagos: reembolso antes del pago, reintento de liberación tras `checkout.session.expired`.
+- Asignación: `assignment_conflict`/`assignment_changed`; `picked_up → delivery_failed`.
+- Verificación: `scripts/verify-appwrite.mjs` revisa permisos de `menu`/`orders` y consistencia de variables.
+- Simulación de Functions: `node appwrite-functions/smoke-test/run-smoke.mjs` (también corre dentro de `npm test`).
