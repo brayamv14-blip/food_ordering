@@ -150,4 +150,6 @@ export interface GetMenuParams {
     limit?: number;
     /** Si es true, ordena del mas reciente al mas antiguo. */
     newest?: boolean;
+    /** v15: solo productos de esa tienda (multitienda). */
+    storeId?: string;
 }

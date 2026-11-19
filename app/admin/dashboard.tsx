@@ -4,6 +4,7 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import AdminShell, { useRoleGate } from "@/components/AdminShell";
+import AdminStoreFilter, { useAdminStoreFilter } from "@/components/AdminStoreFilter";
 import { formatMoney } from "@/lib/domain/pricing";
 import { DashboardData, DriversSummary, ReportPeriod, getDashboard, periodRange } from "@/lib/services/admin.service";
 import { describeBackendError } from "@/lib/services/staff.service";
@@ -15,12 +16,15 @@ const LINKS: { href: string; label: string; icon: keyof typeof Ionicons.glyphMap
     { href: "/admin", label: "Pedidos", icon: "receipt-outline" },
     { href: "/admin/map", label: "Mapa en vivo", icon: "map-outline" },
     { href: "/admin/drivers", label: "Repartidores", icon: "bicycle-outline" },
+    { href: "/admin/driver-applications", label: "Solicitudes de repartidor", icon: "person-add-outline" },
+    { href: "/admin/finance", label: "Finanzas y comisiones", icon: "cash-outline" },
     { href: "/admin/payments", label: "Pagos y reembolsos", icon: "card-outline" },
     { href: "/admin/products", label: "Productos y stock", icon: "fast-food-outline" },
     { href: "/admin/categories", label: "Categorías", icon: "list-outline" },
     { href: "/admin/customers", label: "Clientes", icon: "people-circle-outline" },
     { href: "/admin/reports", label: "Reportes", icon: "bar-chart-outline" },
-    { href: "/admin/users", label: "Usuarios y roles", icon: "shield-outline" },
+    { href: "/admin/stores", label: "Tiendas", icon: "storefront-outline" },
+    { href: "/admin/users", label: "Usuarios", icon: "shield-outline" },
     { href: "/admin/audit", label: "Bitácora", icon: "document-text-outline" }
 ];
 
@@ -34,6 +38,7 @@ const Tile = ({ label, value }: { label: string; value: string | number }) => (
 /** Panel de control: datos reales calculados en el servidor (funcion admin-api, solo admin). */
 const Dashboard = () => {
     const allowed = useRoleGate("admin");
+    const sf = useAdminStoreFilter();
     const [period, setPeriod] = useState<ReportPeriod>("today");
     const [data, setData] = useState<{ d: DashboardData; drivers: DriversSummary; truncated: boolean } | null>(null);
     const [loading, setLoading] = useState(true);
@@ -43,7 +48,7 @@ const Dashboard = () => {
     const load = useCallback(async () => {
         try {
             setError(null);
-            const r = await getDashboard(periodRange(period));
+            const r = await getDashboard({ ...periodRange(period), ...(sf.storeId ? { storeId: sf.storeId } : {}) });
             setData({ d: r.dashboard, drivers: r.driversSummary, truncated: r.truncated });
         } catch (e) {
             setError(describeBackendError(e));
@@ -51,7 +56,7 @@ const Dashboard = () => {
             setLoading(false);
             setRefreshing(false);
         }
-    }, [period]);
+    }, [period, sf.storeId]);
 
     useEffect(() => {
         if (allowed) load();
@@ -61,6 +66,7 @@ const Dashboard = () => {
     return (
         <AdminShell title="Panel de control" allowed={allowed} loading={loading && !data} error={error}>
             <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}>
+                {sf.isGlobal && <AdminStoreFilter stores={sf.stores} value={sf.storeId} onChange={(id) => { setLoading(true); sf.setStoreId(id); }} />}
                 <View className="mb-3 flex-row">
                     {PERIODS.map((p) => (
                         <TouchableOpacity key={p.key} onPress={() => { setLoading(true); setPeriod(p.key); }} className={`mr-2 rounded-full border px-4 py-2 ${period === p.key ? "border-primary bg-primary" : "border-gray-200"}`} accessibilityRole="button" accessibilityState={{ selected: period === p.key }}>
@@ -80,6 +86,10 @@ const Dashboard = () => {
                             <Tile label="Stripe (en línea)" value={formatMoney(d.revenueByMethod.online)} />
                             <Tile label="Reembolsado" value={formatMoney(d.refunded)} />
                             <Tile label="Cancelación" value={`${d.cancellationRate}%`} />
+                            <Tile label="Propinas" value={formatMoney(d.tips ?? 0)} />
+                            <Tile label="Pedidos con cupón" value={d.couponOrders ?? 0} />
+                            <Tile label="Calificación" value={d.ratings?.average != null ? `${d.ratings.average} ★ (${d.ratings.count})` : "Sin calificaciones"} />
+                            <Tile label="Repartidores ★" value={d.ratings?.driverAverage != null ? `${d.ratings.driverAverage} ★` : "—"} />
                         </View>
                         {d.unpaidOnlineOrders > 0 && <Text className="mb-2 text-xs text-amber-600">{d.unpaidOnlineOrders} pedido(s) en línea sin pago confirmado.</Text>}
 
@@ -93,7 +103,16 @@ const Dashboard = () => {
                         <Text className="mb-2 text-base font-bold text-dark-100">Repartidores</Text>
                         <Text className="mb-3 text-sm text-gray-500">Disponibles {data!.drivers.available} · Ocupados {data!.drivers.busy} · Desconectados {data!.drivers.offline} (de {data!.drivers.total})</Text>
 
-                        <Text className="mb-2 text-base font-bold text-dark-100">Productos más vendidos</Text>
+                        {d.ratings && d.ratings.recentComments.length > 0 && (
+                            <>
+                                <Text className="mb-2 text-base font-bold text-dark-100">Comentarios recientes</Text>
+                                {d.ratings.recentComments.map((c) => (
+                                    <Text key={c.orderId} className="mb-1 text-sm text-dark-100">{"★".repeat(c.rating)} “{c.comment}” · #{c.orderId.slice(-6)}</Text>
+                                ))}
+                            </>
+                        )}
+
+                        <Text className="mb-2 mt-3 text-base font-bold text-dark-100">Productos más vendidos</Text>
                         {d.topProducts.length === 0 && <Text className="mb-3 text-gray-400">Sin ventas en el periodo.</Text>}
                         {d.topProducts.slice(0, 5).map((p) => (
                             <Text key={p.menuId} className="mb-1 text-sm text-dark-100">{p.name} · {p.quantity} u · {formatMoney(p.sales)}</Text>

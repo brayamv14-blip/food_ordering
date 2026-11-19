@@ -60,9 +60,10 @@ describe("estados del pedido", () => {
         expect(canCustomerCancel("picked_up")).toBe(false);
     });
 
-    it("el cliente solo cancela pedidos pendientes", () => {
+    it("el cliente solo cancela pedidos pendientes o confirmados (antes de prepararse)", () => {
         expect(canCustomerCancel("pending")).toBe(true);
-        for (const s of ["confirmed", "preparing", "ready", "on_the_way", "delivery_failed", "delivered", "cancelled", "x", null]) {
+        expect(canCustomerCancel("confirmed")).toBe(true);
+        for (const s of ["preparing", "ready", "on_the_way", "delivery_failed", "delivered", "cancelled", "x", null]) {
             expect(canCustomerCancel(s)).toBe(false);
         }
     });

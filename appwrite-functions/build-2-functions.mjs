@@ -22,7 +22,7 @@ import status from './status.js';
 import webhook from './webhook.js';
 import admin from './admin.js';
 
-const ADMIN_ACTIONS = new Set(['whoami', 'listProducts', 'listCategories', 'saveProduct', 'setProductAvailability', 'adjustStock', 'stockMovements', 'listPayments', 'report', 'reconcileInventory', 'listUsers', 'setRole', 'dashboard', 'saveCategory', 'setCategoryActive', 'deleteCategory', 'listCustomers', 'customerOrders', 'setUserStatus', 'listAudit']);
+const ADMIN_ACTIONS = new Set(['whoami', 'listProducts', 'listCategories', 'saveProduct', 'setProductAvailability', 'adjustStock', 'stockMovements', 'listPayments', 'report', 'reconcileInventory', 'listUsers', 'setRole', 'dashboard', 'saveCategory', 'setCategoryActive', 'deleteCategory', 'listCustomers', 'customerOrders', 'setUserStatus', 'listAudit', 'userHistory', 'createUser', 'updateUser', 'resetPassword', 'listStores', 'saveStore', 'setStoreActive', 'financeReport', 'listDriverApplications', 'reviewDriver']);
 
 export default async (ctx) => {
     const { req } = ctx;

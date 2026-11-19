@@ -1,5 +1,5 @@
 // Doble en memoria de node-appwrite para pruebas de humo. NO es Appwrite real.
-export const store = { orders: [], items: [], menu: [], cust: [], rel: [], events: [], users: [], moves: [], cats: [], audit: [], status: {}, prefs: {}, failIncrement: false, columnMin0: true, failDecrementFor: null, decrementCalls: 0, failDecrementNth: 0, labels: {}, names: {}, failItemAt: 0, failEvents: false, pushes: [], failPush: false };
+export const store = { orders: [], items: [], menu: [], cust: [], rel: [], events: [], users: [], moves: [], cats: [], audit: [], status: {}, prefs: {}, failIncrement: false, columnMin0: true, failDecrementFor: null, decrementCalls: 0, failDecrementNth: 0, labels: {}, names: {}, emails: {}, stores: [], recoveries: [], failLabels: false, failRecovery: false, failItemAt: 0, failEvents: false, pushes: [], failPush: false };
 let tick = 0;
 const stamp = () => new Date(Date.UTC(2026, 0, 1, 0, 0, ++tick)).toISOString();
 let n = 0;
@@ -18,7 +18,7 @@ export const Query = {
   isNull: (f) => ({ f, op: 'isNull', v: [] }),
   notEqual: (f, v) => ({ f, op: 'ne', v: [].concat(v) })
 };
-const T = { orders: 'orders', items: 'items', menu: 'menu', cust: 'cust', rel: 'rel', events: 'events', users: 'users', moves: 'moves', cats: 'cats', audit: 'audit' };
+const T = { orders: 'orders', items: 'items', menu: 'menu', cust: 'cust', rel: 'rel', events: 'events', users: 'users', moves: 'moves', cats: 'cats', audit: 'audit', stores: 'stores' };
 const tbl = (id) => store[T[id]];
 const matches = (r, queries) => queries.filter((q) => q.f).every((q) => {
   const val = r[q.f];
@@ -68,16 +68,28 @@ export class TablesDB {
 export class Users {
   async get({ userId }) {
     if (!(userId in store.labels) && !(userId in store.names)) { if (!userId.startsWith('u')) throw new Error('user_not_found'); }
-    return { $id: userId, labels: store.labels[userId] ?? [], name: store.names[userId] ?? userId, prefs: store.prefs[userId] ?? {}, email: userId + '@ejemplo.test', status: store.status[userId] !== false };
+    return { $id: userId, labels: store.labels[userId] ?? [], name: store.names[userId] ?? userId, prefs: store.prefs[userId] ?? {}, email: store.emails[userId] ?? userId + '@ejemplo.test', status: store.status[userId] !== false, $createdAt: '2026-01-01T00:00:00.000Z' };
   }
   async list({ queries = [], search } = {}) {
     const q = queries.find((x) => x.f === 'labels');
-    const ids = Object.keys(store.labels).filter((id) => (!q || store.labels[id].some((l) => q.v.includes(l))) && (!search || (store.names[id] ?? id).toLowerCase().includes(search.toLowerCase())));
-    return { users: ids.map((id) => ({ $id: id, name: store.names[id] ?? id, labels: store.labels[id], prefs: store.prefs[id] ?? {}, email: id + '@ejemplo.test', status: store.status[id] !== false, $createdAt: '2026-01-01T00:00:00.000Z' })) };
+    const qe = queries.find((x) => x.f === 'email');
+    const ids = Object.keys(store.labels).filter((id) => (!q || store.labels[id].some((l) => q.v.includes(l))) && (!search || (store.names[id] ?? id).toLowerCase().includes(search.toLowerCase())) && (!qe || (store.emails[id] ?? id + '@ejemplo.test') === qe.v[0]));
+    return { users: ids.map((id) => ({ $id: id, name: store.names[id] ?? id, labels: store.labels[id], prefs: store.prefs[id] ?? {}, email: store.emails[id] ?? id + '@ejemplo.test', status: store.status[id] !== false, $createdAt: '2026-01-01T00:00:00.000Z' })) };
   }
   async updatePrefs({ userId, prefs }) { store.prefs[userId] = prefs; return prefs; }
   async updateStatus({ userId, status }) { store.status[userId] = status; return { $id: userId, status }; }
-  async updateLabels({ userId, labels }) { store.labels[userId] = labels; return { $id: userId, labels }; }
+  async updateLabels({ userId, labels }) { if (store.failLabels) throw new Error('labels down'); store.labels[userId] = labels; return { $id: userId, labels }; }
+  async updateName({ userId, name }) { store.names[userId] = name; return { $id: userId, name }; }
+  async create({ userId, email, password, name }) {
+    if (Object.values(store.emails).includes(email)) { const e = new Error('A user with the same id, email, or phone already exists'); e.code = 409; throw e; }
+    if (typeof password !== 'string' || password.length < 8) { const e = new Error('password'); e.code = 400; throw e; }
+    store.labels[userId] = []; store.names[userId] = name; store.emails[userId] = email; store.status[userId] = true;
+    return { $id: userId, email, name, labels: [], status: true, $createdAt: '2026-01-01T00:00:00.000Z' };
+  }
+  async delete({ userId }) { delete store.labels[userId]; delete store.names[userId]; delete store.emails[userId]; return {}; }
+}
+export class Account {
+  async createRecovery({ email, url }) { if (store.failRecovery) throw new Error('smtp down'); store.recoveries.push({ email, url }); return {}; }
 }
 // Appwrite Messaging: solo registra los envios (no hay FCM real).
 export class Messaging {

@@ -160,8 +160,41 @@ export async function getOrderHistory(orderId: string): Promise<{ enabled: boole
 }
 
 /** Cambio de estado; el servidor decide si el usuario y la transicion son validos. */
-export async function changeOrderStatus(orderId: string, status: OrderStatus, expected: ExpectedState = {}, reason?: string): Promise<void> {
-    await call("updateStatus", clean({ orderId, status, ...expected, reason }));
+export async function changeOrderStatus(orderId: string, status: OrderStatus, expected: ExpectedState = {}, reason?: string, deliveryCode?: string): Promise<void> {
+    await call("updateStatus", clean({ orderId, status, ...expected, reason, deliveryCode }));
+}
+
+// ---------------------------------------------------------------- V16: alta, codigo de entrega, ganancias, tiempo limite
+export type DriverAccountState = "pending" | "approved" | "suspended" | null;
+export const DRIVER_VEHICLES = [["bicicleta", "Bicicleta"], ["moto", "Moto"], ["auto", "Auto"], ["a_pie", "A pie"]] as const;
+export type DriverApplicationInput = { phone: string; vehicle: string; storeId?: string; note?: string };
+
+/** Cualquier cliente puede solicitar ser repartidor; queda PENDIENTE hasta que un administrador la apruebe. */
+export async function applyDriver(application: DriverApplicationInput): Promise<{ state: "pending" }> {
+    return call("applyDriver", { application: clean(application) });
+}
+export async function getMyDriverStatus(): Promise<{ state: DriverAccountState; available: boolean | null }> {
+    const r = await call<{ state?: DriverAccountState; available?: boolean | null }>("myDriverStatus");
+    return { state: r?.state ?? null, available: r?.available ?? null };
+}
+/** Codigo de 4 digitos que el CLIENTE le dicta al repartidor (solo si el servidor tiene DELIVERY_OTP=true). */
+export async function getMyDeliveryCode(orderId: string): Promise<{ enabled: boolean; code: string | null }> {
+    const r = await call<{ enabled?: boolean; code?: string | null }>("myDeliveryCode", { orderId });
+    return { enabled: r?.enabled === true, code: r?.code ?? null };
+}
+export interface DriverEarnings {
+    totals: { delivered: number; cancelled: number; failed: number; earnings: number; tips: number };
+    byDay: Record<string, number>;
+    deliveries: { orderId: string; at: string; earning: number; tip: number; deliveryFee: number }[];
+    config: { driverPct: number }; payouts: "not_implemented"; truncated: boolean;
+}
+export async function getDriverEarnings(range: { from?: string; to?: string; driverUserId?: string } = {}): Promise<DriverEarnings> {
+    return call<DriverEarnings>("driverEarnings", clean(range));
+}
+/** Libera asignaciones sin respuesta dentro del tiempo limite (solo personal). No hace nada si el servidor no lo configuro. */
+export async function expireAssignments(): Promise<{ enabled: boolean; expired: { orderId: string; reassigned: boolean }[] }> {
+    const r = await call<{ enabled?: boolean; expired?: { orderId: string; reassigned: boolean }[] }>("expireAssignments");
+    return { enabled: r?.enabled === true, expired: r?.expired ?? [] };
 }
 
 /** Ubicacion del repartidor (solo repartidor asignado y pedido en camino). */

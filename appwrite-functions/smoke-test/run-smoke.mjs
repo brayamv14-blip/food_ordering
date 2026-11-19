@@ -15,12 +15,16 @@ try {
     cpSync(join(here, 'fake-node-appwrite'), join(tmp, 'node_modules', 'node-appwrite'), { recursive: true });
     for (const f of ['create-order', 'update-order-status', 'stripe-webhook', 'admin-api']) cpSync(join(fnRoot, f), join(tmp, f), { recursive: true });
     cpSync(join(fnRoot, 'plan-gratuito'), join(tmp, 'plan-gratuito'), { recursive: true });
-    cpSync(join(here, 'run.mjs'), join(tmp, 'run.mjs'));
     writeFileSync(join(tmp, 'package.json'), '{"type":"module"}');
-    const r = spawnSync(process.execPath, ['run.mjs'], { cwd: tmp, encoding: 'utf8' });
-    process.stdout.write(r.stdout ?? '');
-    process.stderr.write(r.stderr ?? '');
-    process.exitCode = r.status ?? 1;
+    // Cada script corre en su propio proceso: las Functions leen su configuracion al importarse.
+    process.exitCode = 0;
+    for (const script of ['run.mjs', 'run15.mjs', 'run16.mjs']) {
+        cpSync(join(here, script), join(tmp, script));
+        const r = spawnSync(process.execPath, [script], { cwd: tmp, encoding: 'utf8' });
+        process.stdout.write(r.stdout ?? '');
+        process.stderr.write(r.stderr ?? '');
+        if ((r.status ?? 1) !== 0) process.exitCode = r.status ?? 1;
+    }
 } finally {
     rmSync(tmp, { recursive: true, force: true });
 }

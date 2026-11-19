@@ -14,8 +14,11 @@ import { STATUS_META, parseOrderStatus } from "@/lib/domain/orderStatus";
 import { formatMoney } from "@/lib/domain/pricing";
 import { getActiveOrder, getCategories, getCurrentUser, getMenu } from "@/lib/appwrite";
 import { advanceDemo, isDemoAutopilotEnabled, syncPayment } from "@/lib/services/payments.service";
+import { loadFavorites } from "@/lib/services/favorites.service";
 import { listSelectableAddresses, mapProfileRow } from "@/lib/services/profile.service";
+import StorePicker from "@/components/StorePicker";
 import useAuthStore from "@/store/auth.store";
+import useStoreSelection from "@/store/store.store";
 import { Category, MenuItem } from "@/type";
 
 // Una sola redireccion por sesion de la app: asi el usuario con rol puede volver aqui y comprar.
@@ -49,14 +52,19 @@ export default function Index() {
     const [error, setError] = useState<string | null>(null);
     const [query, setQuery] = useState("");
     const [bannerIndex, setBannerIndex] = useState(0);
+    const [favIds, setFavIds] = useState<string[]>([]);
     const loadId = useRef(0);
+    // v15: con multitienda el catalogo es de la tienda elegida.
+    const storeEnabled = useStoreSelection((s) => s.enabled);
+    const storeId = useStoreSelection((s) => s.storeId);
 
+    const userId = user?.$id;
     const load = useCallback(async () => {
         const id = ++loadId.current;
         try {
             setError(null);
             // Catalogo imprescindible: si falla, se muestra error con reintento.
-            const [cats, items] = await Promise.all([getCategories(), getMenu({ limit: 40, newest: true })]);
+            const [cats, items] = await Promise.all([getCategories(storeEnabled && storeId ? storeId : undefined), getMenu({ limit: 40, newest: true, ...(storeEnabled && storeId ? { storeId } : {}) })]);
             if (id !== loadId.current) return;
             setCategories(cats);
             setMenu(items);
@@ -66,7 +74,8 @@ export default function Index() {
             if (id === loadId.current) { setLoading(false); setRefreshing(false); }
         }
         // Datos secundarios: un fallo aqui no tumba la pantalla.
-        if (user?.$id) getActiveOrder(user.$id).then((o) => id === loadId.current && setActiveOrder(o)).catch(() => {});
+        if (userId) getActiveOrder(userId).then((o) => id === loadId.current && setActiveOrder(o)).catch(() => {});
+        loadFavorites().then((l) => id === loadId.current && setFavIds(l));
         getCurrentUser()
             .then((row) => {
                 const list = listSelectableAddresses(mapProfileRow(row as Record<string, unknown>));
@@ -75,7 +84,7 @@ export default function Index() {
                 if (id === loadId.current) setAddress(chosen?.line ?? null);
             })
             .catch(() => {});
-    }, [user?.$id]);
+    }, [userId, storeEnabled, storeId]);
 
     useEffect(() => { load(); }, [load]);
     useEffect(() => {
@@ -122,6 +131,8 @@ export default function Index() {
     }, [load]);
 
     const newest = useMemo(() => pickNewest(menu, 8), [menu]);
+    // Favoritos (de las preferencias de la cuenta) que estan en el catalogo cargado y siguen disponibles.
+    const favorites = useMemo(() => favIds.map((id) => menu.find((m) => m.$id === id)).filter((m): m is MenuItem => !!m && m.available !== false), [favIds, menu]);
     const grid = useMemo(() => menu.slice(0, 6), [menu]);
     const available = menu.filter((m) => m.available !== false).length;
     const status = activeOrder ? parseOrderStatus(activeOrder.status) : null;
@@ -155,6 +166,8 @@ export default function Index() {
                     </TouchableOpacity>
                     <CartButton />
                 </View>
+
+                <StorePicker />
 
                 {/* Buscador */}
                 <View className="mx-5 mt-5 flex-row items-center rounded-full bg-white px-5" style={{ elevation: 5, shadowColor: "#878787" }}>
@@ -258,6 +271,21 @@ export default function Index() {
                             </View>
                         ) : (
                             <>
+                                {/* Favoritos */}
+                                {favorites.length > 0 && (
+                                    <>
+                                        <SectionTitle title="Tus favoritos" />
+                                        <FlatList
+                                            data={favorites}
+                                            horizontal
+                                            showsHorizontalScrollIndicator={false}
+                                            contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 12 }}
+                                            keyExtractor={(i) => i.$id}
+                                            renderItem={({ item }) => <ProductTile item={item} />}
+                                        />
+                                    </>
+                                )}
+
                                 {/* Novedades */}
                                 <SectionTitle title="Novedades" action="Ver menú" onAction={() => goSearch()} />
                                 <FlatList

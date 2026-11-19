@@ -7,7 +7,7 @@ El plan gratuito permite 2 funciones aquí. En vez de 4, se despliegan **dos**:
 | `create-order` | crear pedidos + sesión de Stripe | `appwrite-functions/plan-gratuito/create-order` |
 | `update-order-status` | estados, repartidores, **webhook de Stripe** y **administración** | `appwrite-functions/plan-gratuito/update-order-status` |
 
-`update-order-status` enruta solo: cabecera `stripe-signature` → webhook; acciones de administración → admin (exige etiqueta `admin`/`staff` en el servidor); lo demás → estados. Se regenera con `bash appwrite-functions/sync-shared.sh && node appwrite-functions/build-2-functions.mjs`.
+`update-order-status` enruta solo: cabecera `stripe-signature` → webhook; acciones de administración → admin (exige etiqueta `admin`/`staff` en el servidor); lo demás → estados. Se regenera con `node appwrite-functions/sync-shared.mjs  (en Windows; en Linux/Mac también sirve sync-shared.sh) && node appwrite-functions/build-2-functions.mjs`.
 
 ## Variables
 **create-order**: `DATABASE_ID`, `ORDERS_TABLE_ID`, `ORDER_ITEMS_TABLE_ID`, `MENU_TABLE_ID`, `CUSTOMIZATIONS_TABLE_ID`, `MENU_CUSTOMIZATIONS_TABLE_ID`, `DISCOUNT`, `DELIVERY_FEE`, `STRIPE_SECRET_KEY` + **`PAYMENT_RETURN_URL`** + **`INVENTORY_MOVES_TABLE_ID`** (nuevas) + opcionales `ORDER_EVENTS_TABLE_ID`, `RESTAURANT_LATITUDE`, `RESTAURANT_LONGITUDE`, `DELIVERY_RADIUS_KM`.

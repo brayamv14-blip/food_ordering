@@ -1,11 +1,13 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { Client, ID, Messaging, Query, TablesDB, Users } from 'node-appwrite';
 import {
     ACTIVE_DELIVERY, buildAssignmentNotification, buildDriverRejectedNotification, makeInventory, pickDriver, buildCheckoutSessionParams, buildOrderEvent, buildPaymentNotification,
     buildPushRequest, buildStatusNotification, canActorTransition, canAssignDriver, checkExpected, checkSessionPayment,
     isStripeCheckoutUrl, matchesOrderQuery, movePaymentStatus, parseDateRange, paymentIntentId, stripeRequest,
     toStaffOrderView, validateDriverPosition, driverState, normalizeReason, planRefund, buildAuditEntry, POOL_STATUSES, IN_TRANSIT, toPoolView,
-    buildDriverCancelledNotification, distanceKm, demoNextStep, demoDriverFor, demoPosition
+    buildDriverCancelledNotification, distanceKm, demoNextStep, demoDriverFor, demoPosition, validateRating,
+    DEFAULT_STORE_ID, actorScope, storeOf, canAccessStore,
+    splitFinance, driverAccountState, validateDriverApplication, DRIVER_PENDING_LABEL, deliveryCode, OTP_MAX_FAILS, assignmentExpired, storeLabel
 } from './rules.js';
 
 /**
@@ -28,6 +30,7 @@ const ITEMS = process.env.ORDER_ITEMS_TABLE_ID;
 const EVENTS = process.env.ORDER_EVENTS_TABLE_ID; // opcional
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY; // solo en la Function; necesario para pagos y reembolsos
 const PAYMENT_RETURN_URL = process.env.PAYMENT_RETURN_URL; // https de recovery-bridge/payment-return.html
+const STORES = process.env.STORES_TABLE_ID; // V15: multitienda (sin esto, una sola tienda como en V14)
 const MENU = process.env.MENU_TABLE_ID;
 const MOVES = process.env.INVENTORY_MOVES_TABLE_ID; // sin ella no se controla inventario
 // Asignacion automatica de repartidor al pasar a "preparing" (apagada por omision).
@@ -41,6 +44,12 @@ const RESTAURANT = (() => {
 // MODO DEMOSTRACION (apagado por omision): avanza pedidos solos con repartidores FICTICIOS. Solo para presentar la app.
 const DEMO = process.env.DEMO_AUTOPILOT === 'true';
 const DEMO_TRIP_SECONDS = Number(process.env.DEMO_TRIP_SECONDS) > 0 ? Number(process.env.DEMO_TRIP_SECONDS) : 90;
+// V16 (todo opcional y apagado por omision: sin configurar, el comportamiento es el de V14/V15).
+const DELIVERY_OTP = process.env.DELIVERY_OTP === 'true';            // el repartidor debe ingresar el codigo del cliente para marcar "entregado"
+const OTP_SECRET = process.env.DELIVERY_OTP_SECRET;                  // obligatorio si DELIVERY_OTP=true
+const ASSIGNMENT_TIMEOUT_SECONDS = Number(process.env.ASSIGNMENT_TIMEOUT_SECONDS ?? 0); // 0 = sin limite
+const PLATFORM_PCT = Number(process.env.PLATFORM_COMMISSION_PCT ?? 0);
+const DRIVER_PCT = Number(process.env.DRIVER_FEE_PCT ?? 100);
 const STATUSES = ['pending', 'confirmed', 'preparing', 'ready', 'picked_up', 'on_the_way', 'delivery_failed', 'delivered', 'cancelled'];
 
 const fail = (res, status, code, error) => res.json({ code, error }, status);
@@ -87,6 +96,7 @@ export default async ({ req, res, log, error }) => {
         }
     };
 
+    const otpHmac = (v) => createHmac('sha256', OTP_SECRET || 'unset').update(v).digest('hex');
     const inventory = makeInventory({ db, DB, MENU, MOVES, Query, hash: (s) => createHash('sha256').update(s).digest('hex') });
     /** Devuelve el stock reservado del pedido (idempotente). Un fallo se registra y se puede reintentar. */
     const releaseStock = async (orderId) => {
@@ -98,9 +108,11 @@ export default async ({ req, res, log, error }) => {
             return false;
         }
     };
-    const notifyStaff = async (message) => {
+    const notifyStaff = async (message, storeId = null) => {
         try {
-            const staff = await users.list({ queries: [Query.equal('labels', ['staff', 'admin']), Query.limit(50)] });
+            const all = await users.list({ queries: [Query.equal('labels', ['staff', 'admin', 'superadmin']), Query.limit(100)] });
+            // V15: solo el personal de la tienda del pedido (y administradores globales).
+            const staff = { users: all.users.filter((u) => { if (!STORES || !storeId) return true; const sc = actorScope(u.labels); return sc.global || sc.storeId === storeId; }) };
             for (const s of staff.users) await notify(s.$id, message);
         } catch (e) {
             error(`staff_notify_failed: ${e.message}`);
@@ -154,10 +166,11 @@ export default async ({ req, res, log, error }) => {
     /** Asignacion automatica: repartidor disponible con menos entregas activas. Devuelve true si asigno. */
     const autoAssign = async (order, excludeId = null) => {
         if (!AUTO_ASSIGN || order.driverUserId) return false;
-        const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(50)] });
+        const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(100)] });
         const loads = await driverLoads();
         const chosen = pickDriver(
-            list.users.filter((u) => u.$id !== excludeId).map((u) => {
+            // V15: solo repartidores de la tienda del pedido.
+            list.users.filter((u) => u.$id !== excludeId && (!STORES || actorScope(u.labels).storeId === storeOf(order))).map((u) => {
                 const s = stateOf(u, loads);
                 // Solo conectados y sin ultima senal vencida; "ocupado" (en transito) queda fuera.
                 return { id: u.$id, name: u.name, available: driverIsAvailable(u) && !s.stale && s.status !== 'busy', active: loads.load[u.$id] || 0 };
@@ -207,11 +220,17 @@ export default async ({ req, res, log, error }) => {
     try {
         const me = await users.get({ userId });
         const labels = me.labels ?? [];
-        const isStaff = labels.includes('staff') || labels.includes('admin');
-        const isDriver = labels.includes('driver');
+        const scope = actorScope(labels);
+        const MULTI = !!STORES;
+        const isStaff = scope.isStaff;
+        const isDriver = scope.isDriver;
+        /** Aislamiento por tienda (V15). Sin multitienda no filtra nada. */
+        const staffCan = (order) => !MULTI || canAccessStore(scope, storeOf(order));
+        const driverCan = (order) => !MULTI || (scope.storeId || DEFAULT_STORE_ID) === storeOf(order);
+        const driverVisible = (u) => !MULTI || (scope.global ? (typeof body.storeId !== 'string' || !body.storeId || actorScope(u.labels).storeId === body.storeId) : actorScope(u.labels).storeId === scope.storeId);
         const actor = isStaff ? 'staff' : isDriver ? 'driver' : 'customer';
         const needStaff = () => (isStaff ? null : fail(res, 403, 'forbidden', 'Solo personal autorizado.'));
-        const needAdmin = () => (labels.includes('admin') ? null : fail(res, 403, 'forbidden', 'Solo administradores.'));
+        const needAdmin = () => (scope.isAdmin ? null : fail(res, 403, 'forbidden', 'Solo administradores.'));
         /** Marca la ultima senal del repartidor (como mucho 1 vez por minuto). Relee las preferencias para no pisar cambios recientes. */
         const touchDriver = async () => {
             if (!isDriver) return;
@@ -231,6 +250,8 @@ export default async ({ req, res, log, error }) => {
                 if (typeof orderId !== 'string' || typeof to !== 'string') return fail(res, 400, 'bad_request', 'Datos incompletos.');
                 const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
                 const isOwner = order.userId === userId;
+                if (actor === 'staff' && !isOwner && !staffCan(order)) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+                if (actor === 'driver' && !driverCan(order)) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
 
                 // Un repartidor solo opera pedidos que tiene asignados.
                 if (actor === 'driver' && order.driverUserId !== userId) return fail(res, 403, 'forbidden', 'Este pedido no está asignado a ti.');
@@ -239,6 +260,20 @@ export default async ({ req, res, log, error }) => {
 
                 const stale = checkExpected(order, body);
                 if (!stale.ok) return fail(res, 409, stale.code, stale.error);
+
+                // V16: codigo de entrega (OTP). Solo el repartidor lo necesita; el personal puede cerrar entregas (soporte) y queda en el historial.
+                if (DELIVERY_OTP && actor === 'driver' && to === 'delivered') {
+                    if (!OTP_SECRET) return fail(res, 503, 'otp_unavailable', 'El código de entrega no está configurado en el servidor.');
+                    const fails = EVENTS ? (await db.listRows({ databaseId: DB, tableId: EVENTS, queries: [Query.equal('orderId', orderId), Query.equal('type', ['otp_failed']), Query.limit(OTP_MAX_FAILS + 1)] })).rows.length : 0;
+                    if (fails >= OTP_MAX_FAILS) return fail(res, 429, 'otp_locked', 'Demasiados intentos. Avisa al personal para cerrar la entrega.');
+                    const expected = deliveryCode(otpHmac, orderId);
+                    const given = typeof body.deliveryCode === 'string' ? body.deliveryCode.trim() : '';
+                    const a = Buffer.from(expected), b = Buffer.from(given.padEnd(expected.length, ' ').slice(0, expected.length));
+                    if (!/^\d{4}$/.test(given) || !timingSafeEqual(a, b)) {
+                        await record({ orderId, type: 'otp_failed', from: order.status, to, actorId: userId, actorRole: 'driver', driverUserId: userId });
+                        return fail(res, 422, 'bad_delivery_code', 'El código de entrega no es correcto.');
+                    }
+                }
 
                 const verdict = canActorTransition({
                     actor, isOwner, from: order.status, to, hasDriver: !!order.driverUserId, driverAccepted: (order.driverResponse || 'accepted') === 'accepted',
@@ -402,6 +437,8 @@ export default async ({ req, res, log, error }) => {
                     if (order.paymentStatus !== 'paid') return res.json({ status: order.status, advanced: false, waiting: 'payment', paymentStatus: order.paymentStatus || 'pending' });
                 }
 
+                // Repartidor REAL asignado: la simulacion no interviene (solo mueve a los ficticios "demo-driver-N").
+                if (order.driverUserId && !String(order.driverUserId).startsWith('demo-driver-')) return res.json({ status: order.status, advanced: false, paused: 'real_driver' });
                 const plan = demoNextStep(order.status, DEMO_TRIP_SECONDS);
                 if (!plan) return res.json({ status: order.status, advanced: false });
                 const events = (await db.listRows({ databaseId: DB, tableId: EVENTS, queries: [Query.equal('orderId', orderId), Query.orderDesc('$createdAt'), Query.limit(30)] })).rows;
@@ -411,11 +448,17 @@ export default async ({ req, res, log, error }) => {
                 const destination = typeof order.deliveryLatitude === 'number' && typeof order.deliveryLongitude === 'number'
                     ? { latitude: order.deliveryLatitude, longitude: order.deliveryLongitude } : null;
                 const isDemoDriver = typeof order.driverUserId === 'string' && order.driverUserId.startsWith('demo-driver-');
+                // Sin RESTAURANT_LATITUDE/LONGITUDE la simulación usa un origen ficticio ~1.5 km del cliente (o CDMX centro).
+                const storeRow = STORES ? await db.getRow({ databaseId: DB, tableId: STORES, rowId: storeOf(order) }).catch(() => null) : null;
+                const storeOrigin = storeRow && Number.isFinite(Number(storeRow.latitude)) && Number.isFinite(Number(storeRow.longitude)) && storeRow.latitude !== null && storeRow.longitude !== null ? { latitude: Number(storeRow.latitude), longitude: Number(storeRow.longitude) } : null;
+                const demoOrigin = storeOrigin || RESTAURANT || (destination
+                    ? { latitude: destination.latitude - 0.012, longitude: destination.longitude - 0.012 }
+                    : { latitude: 19.4326, longitude: -99.1332 });
 
                 if (elapsed < plan.delay) {
                     // Aun no toca cambiar de estado: solo se mueve el repartidor ficticio (si ya hay uno).
                     if (isDemoDriver) {
-                        const pos = demoPosition({ status: order.status, progress: elapsed / plan.delay, restaurant: RESTAURANT, destination });
+                        const pos = demoPosition({ status: order.status, progress: elapsed / plan.delay, restaurant: demoOrigin, destination });
                         if (pos) await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data: { driverLatitude: pos.latitude, driverLongitude: pos.longitude, driverUpdatedAt: new Date().toISOString() } });
                     }
                     return res.json({ status: order.status, advanced: false, nextInSeconds: Math.ceil(plan.delay - elapsed) });
@@ -423,7 +466,7 @@ export default async ({ req, res, log, error }) => {
 
                 const to = plan.to;
                 const drv = to === 'preparing' && !order.driverUserId ? demoDriverFor(orderId) : null;
-                const claimed = await takeLock('demo', orderId, order.status, { orderId, type: 'status', from: order.status, to, actorId: 'demo', actorRole: 'system', driverUserId: drv ? drv.id : (order.driverUserId ?? null), note: 'simulación (modo demostración)' });
+                const claimed = await takeLock('demo', orderId, order.status, { orderId, type: 'status', from: order.status, to, actorId: 'demo', actorRole: 'system', driverUserId: drv ? drv.id : (order.driverUserId ?? null) });
                 if (claimed === false) return res.json({ status: order.status, advanced: false, busy: true });
                 const data = { status: to };
                 if (drv) {
@@ -435,10 +478,16 @@ export default async ({ req, res, log, error }) => {
                     data.driverLatitude = null;
                     data.driverLongitude = null;
                 } else if (drv || isDemoDriver) {
-                    const pos = demoPosition({ status: to, progress: 0, restaurant: RESTAURANT, destination });
+                    const pos = demoPosition({ status: to, progress: 0, restaurant: demoOrigin, destination });
                     if (pos) Object.assign(data, { driverLatitude: pos.latitude, driverLongitude: pos.longitude, driverUpdatedAt: new Date().toISOString() });
                 }
                 try {
+                    // Si alguien cancelo o cambio el pedido mientras tanto, no se pisa su decision.
+                    const fresh = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                    if (fresh.status !== order.status) {
+                        await dropLock('demo', orderId, order.status);
+                        return res.json({ status: fresh.status, advanced: false, changed: true });
+                    }
                     await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: orderId, data });
                 } catch (e) {
                     await dropLock('demo', orderId, order.status);
@@ -446,6 +495,33 @@ export default async ({ req, res, log, error }) => {
                 }
                 await notify(order.userId, buildStatusNotification(to, orderId));
                 return res.json({ status: to, advanced: true, driverName: drv ? drv.name : order.driverName ?? null });
+            }
+
+            case 'rateOrder': {
+                // El cliente califica su pedido entregado (una sola vez): pedido 1-5 y, opcional, repartidor + comentario.
+                const { orderId } = body;
+                if (typeof orderId !== 'string') return fail(res, 400, 'bad_request', 'Falta el pedido.');
+                if (actor !== 'customer') return fail(res, 403, 'forbidden', 'Solo el cliente califica su pedido.');
+                const v = validateRating(body);
+                if (!v.ok) return fail(res, 400, v.code, v.error);
+                const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (order.userId !== userId) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+                if (order.status !== 'delivered') return fail(res, 409, 'not_delivered', 'Solo puedes calificar un pedido entregado.');
+                if (typeof order.rating === 'number') return fail(res, 409, 'already_rated', 'Ya calificaste este pedido.');
+                // Candado: dos envios simultaneos no califican dos veces.
+                const locked = await takeLock('rate', orderId, 'once', { orderId, type: 'rated', from: 'delivered', to: 'delivered', actorId: userId, actorRole: 'customer', driverUserId: order.driverUserId ?? null });
+                if (locked === false) return fail(res, 409, 'already_rated', 'Ya calificaste este pedido.');
+                try {
+                    await db.updateRow({
+                        databaseId: DB, tableId: ORDERS, rowId: orderId,
+                        data: { rating: v.rating, ratedAt: new Date().toISOString(), ...(v.comment ? { ratingComment: v.comment } : {}), ...(v.driverRating ? { driverRating: v.driverRating } : {}) }
+                    });
+                } catch (e) {
+                    await dropLock('rate', orderId, 'once');
+                    if (/unknown attribute/i.test(String(e.message || ''))) return fail(res, 503, 'needs_migration', 'Falta actualizar la base de datos para guardar calificaciones (migración v14).');
+                    throw e;
+                }
+                return res.json({ orderId, rating: v.rating, driverRating: v.driverRating });
             }
 
             case 'updateLocation': {
@@ -494,6 +570,7 @@ export default async ({ req, res, log, error }) => {
                 // Con busqueda se revisan hasta 100 recientes (el sufijo del id no es consultable).
                 queries.push(Query.limit(searching ? 100 : 50));
                 let orders = (await db.listRows({ databaseId: DB, tableId: ORDERS, queries })).rows;
+                if (MULTI) orders = orders.filter((o) => staffCan(o) && (!scope.global || typeof body.storeId !== 'string' || !body.storeId || storeOf(o) === body.storeId));
                 if (searching) orders = orders.filter((o) => matchesOrderQuery(o.$id, body.query)).slice(0, 50);
                 const items = await itemsFor(orders);
                 return res.json({ orders: orders.map((o) => toStaffOrderView(o, items[o.$id] ?? [])) });
@@ -502,9 +579,9 @@ export default async ({ req, res, log, error }) => {
             case 'listDrivers': {
                 const denied = needStaff();
                 if (denied) return denied;
-                const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(50)] });
+                const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(100)] });
                 const loads = await driverLoads();
-                return res.json({ drivers: list.users.map((u) => driverView(u, loads)) });
+                return res.json({ drivers: list.users.filter(driverVisible).map((u) => driverView(u, loads)) });
             }
 
             case 'assignDriver': {
@@ -515,6 +592,10 @@ export default async ({ req, res, log, error }) => {
                 const driver = await users.get({ userId: driverUserId }).catch(() => null);
                 if (!driver || !(driver.labels ?? []).includes('driver')) return fail(res, 422, 'not_a_driver', 'Esa cuenta no es repartidor.');
                 const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (!staffCan(order)) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+                // V15: el repartidor debe pertenecer a la tienda del pedido y estar activo.
+                if (MULTI && actorScope(driver.labels).storeId !== storeOf(order)) return fail(res, 422, 'driver_other_store', 'Ese repartidor pertenece a otra tienda.');
+                if (driver.status === false) return fail(res, 422, 'driver_inactive', 'Ese repartidor está desactivado.');
                 const stale = checkExpected(order, body);
                 if (!stale.ok) return fail(res, 409, stale.code, stale.error);
                 if (!canAssignDriver(order.status)) return fail(res, 409, 'not_assignable', 'El pedido ya terminó.');
@@ -594,7 +675,7 @@ export default async ({ req, res, log, error }) => {
                 const rejWhy = normalizeReason(body.reason);
                 await record({ orderId, type: 'driver_rejected', from: order.status, to: order.status, actorId: userId, actorRole: 'driver', driverUserId: userId, note: rejWhy.ok ? rejWhy.reason : null });
                 const reassigned = await autoAssign({ ...order, driverUserId: null }, userId).catch((e) => { error(`auto_assign_failed: ${e.message}`); return false; });
-                if (!reassigned) await notifyStaff(buildDriverRejectedNotification(orderId, me.name));
+                if (!reassigned) await notifyStaff(buildDriverRejectedNotification(orderId, me.name), storeOf(order));
                 return res.json({ orderId, driverResponse: 'rejected', reassigned });
             }
 
@@ -603,6 +684,10 @@ export default async ({ req, res, log, error }) => {
                 if (denied) return denied;
                 if (typeof body.orderId !== 'string') return fail(res, 400, 'bad_request', 'Falta el pedido.');
                 if (!EVENTS) return res.json({ events: [], enabled: false });
+                if (MULTI) {
+                    const o = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: body.orderId }).catch(() => null);
+                    if (!o || !staffCan(o)) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+                }
                 const rows = (await db.listRows({
                     databaseId: DB, tableId: EVENTS,
                     queries: [Query.equal('orderId', body.orderId), Query.orderAsc('$createdAt'), Query.limit(100)]
@@ -621,7 +706,7 @@ export default async ({ req, res, log, error }) => {
                 const rows = (await db.listRows({
                     databaseId: DB, tableId: ORDERS,
                     queries: [Query.equal('status', POOL_STATUSES), Query.isNull('driverUserId'), Query.orderAsc('$createdAt'), Query.limit(30)]
-                })).rows;
+                })).rows.filter(driverCan);
                 const items = await itemsFor(rows);
                 return res.json({
                     orders: rows.map((o) => {
@@ -640,6 +725,7 @@ export default async ({ req, res, log, error }) => {
                 const loads = await driverLoads();
                 if ((loads.load[userId] || 0) >= MAX_ACTIVE_PER_DRIVER) return fail(res, 409, 'driver_busy', 'Ya tienes el máximo de entregas activas.');
                 const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: orderId });
+                if (!driverCan(order)) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
                 if (order.driverUserId) {
                     return order.driverUserId === userId
                         ? res.json({ orderId, driverResponse: order.driverResponse || 'accepted', duplicate: true })
@@ -686,7 +772,7 @@ export default async ({ req, res, log, error }) => {
                 if (!EVENTS) return fail(res, 503, 'history_disabled', 'El registro de incidencias no está configurado.');
                 const locked = await takeLock('issue', order.$id, 'once', { orderId: order.$id, type: 'customer_issue', from: order.status, to: order.status, actorId: userId, actorRole: 'customer', driverUserId: order.driverUserId ?? null, note: why.reason });
                 if (locked === false) return res.json({ orderId: order.$id, duplicate: true });
-                await notifyStaff({ title: 'Problema reportado', body: `El cliente reportó un problema con el pedido #${String(order.$id).slice(-6)}.`, data: { type: 'customer_issue', orderId: order.$id } });
+                await notifyStaff({ title: 'Problema reportado', body: `El cliente reportó un problema con el pedido #${String(order.$id).slice(-6)}.`, data: { type: 'customer_issue', orderId: order.$id } }, storeOf(order));
                 return res.json({ orderId: order.$id, reported: true });
             }
 
@@ -696,6 +782,7 @@ export default async ({ req, res, log, error }) => {
                 if (denied) return denied;
                 if (typeof body.orderId !== 'string') return fail(res, 400, 'bad_request', 'Falta el pedido.');
                 const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: body.orderId });
+                if (!staffCan(order)) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
                 const plan = planRefund({ order, amount: body.amount, reason: body.reason });
                 if (!plan.ok) return fail(res, plan.status, plan.code, plan.error);
                 if (!STRIPE_KEY) return fail(res, 503, 'payment_unavailable', 'El reembolso no está configurado.');
@@ -723,12 +810,12 @@ export default async ({ req, res, log, error }) => {
             case 'driversMap': {
                 const denied = needStaff();
                 if (denied) return denied;
-                const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(50)] });
+                const list = await users.list({ queries: [Query.equal('labels', ['driver']), Query.limit(100)] });
                 const loads = await driverLoads();
                 const unassigned = (await db.listRows({
                     databaseId: DB, tableId: ORDERS,
                     queries: [Query.equal('status', POOL_STATUSES), Query.isNull('driverUserId'), Query.limit(50)]
-                })).rows;
+                })).rows.filter(staffCan);
                 const point = (o) => ({
                     id: o.$id, status: o.status, driverUserId: o.driverUserId || null,
                     deliveryAddress: o.deliveryAddress || '',
@@ -740,11 +827,95 @@ export default async ({ req, res, log, error }) => {
                 });
                 return res.json({
                     restaurant: RESTAURANT,
-                    drivers: list.users.map((u) => driverView(u, loads)),
-                    orders: loads.active.filter((o) => o.driverUserId).map(point),
+                    drivers: list.users.filter(driverVisible).map((u) => driverView(u, loads)),
+                    orders: loads.active.filter((o) => o.driverUserId && staffCan(o)).map(point),
                     unassigned: unassigned.map(point),
                     at: new Date().toISOString()
                 });
+            }
+
+
+            // ---------------------------------------------------------------- V16: alta de repartidores, codigo de entrega, ganancias, tiempo limite
+            case 'applyDriver': {
+                // Cualquier cuenta de CLIENTE puede solicitar ser repartidor. Solo recibe la etiqueta `pdriver` (pendiente): NUNCA `driver`.
+                if (isStaff || isDriver) return fail(res, 409, 'already_staff', 'Tu cuenta ya tiene un rol operativo.');
+                if (labels.includes(DRIVER_PENDING_LABEL)) return fail(res, 409, 'already_pending', 'Tu solicitud ya está en revisión.');
+                const v = validateDriverApplication(body.application);
+                if (!v.ok) return fail(res, 400, v.code, v.error);
+                let storeId = null;
+                if (MULTI) {
+                    storeId = v.data.storeId || DEFAULT_STORE_ID;
+                    const st = await db.getRow({ databaseId: DB, tableId: STORES, rowId: storeId }).catch(() => null);
+                    if (!st || st.active === false) return fail(res, 422, 'store_not_found', 'La tienda elegida no está disponible.');
+                }
+                const fresh = await users.get({ userId });
+                await users.updatePrefs({ userId, prefs: { ...(fresh.prefs || {}), driverPhone: v.data.phone, driverVehicle: v.data.vehicle, driverNote: v.data.note, driverAppliedAt: new Date().toISOString() } });
+                await users.updateLabels({ userId, labels: [...new Set([...(fresh.labels || []), DRIVER_PENDING_LABEL, ...(storeId ? [storeLabel(storeId)] : [])])] });
+                await audit('driver_applied', 'user', userId, storeId ? `tienda ${storeId}` : 'solicitud', 'customer');
+                if (storeId) await notifyStaff({ title: 'Nueva solicitud de repartidor', body: `${String(me.name || 'Una persona').slice(0, 40)} quiere ser repartidor.`, data: { type: 'driver_application' } }, storeId);
+                return res.json({ state: 'pending', storeId });
+            }
+
+            case 'myDriverStatus': {
+                // Estado de la cuenta para el repartidor / solicitante: pendiente, aprobado o suspendido.
+                const state = driverAccountState(labels, me.status !== false);
+                return res.json({ state, available: state === 'approved' ? driverIsAvailable(me) : null, storeId: state ? (scope.storeId || null) : null });
+            }
+
+            case 'myDeliveryCode': {
+                // El cliente ve el codigo de SU pedido cuando ya viene en camino; el repartidor lo recibe de el. Nunca se muestra a terceros.
+                if (!DELIVERY_OTP) return res.json({ enabled: false });
+                if (!OTP_SECRET) return fail(res, 503, 'otp_unavailable', 'El código de entrega no está configurado en el servidor.');
+                if (typeof body.orderId !== 'string') return fail(res, 400, 'bad_request', 'Falta el pedido.');
+                const order = await db.getRow({ databaseId: DB, tableId: ORDERS, rowId: body.orderId }).catch(() => null);
+                if (!order || order.userId !== userId) return fail(res, 404, 'not_found', 'Pedido no encontrado.');
+                if (!['ready', 'picked_up', 'on_the_way'].includes(order.status)) return res.json({ enabled: true, code: null });
+                return res.json({ enabled: true, code: deliveryCode(otpHmac, body.orderId) });
+            }
+
+            case 'driverEarnings': {
+                // Ganancias del repartidor (calculadas con las reglas del servidor sobre pedidos ENTREGADOS). No hay retiros automaticos.
+                const target = isDriver ? userId : (isStaff && typeof body.driverUserId === 'string' ? body.driverUserId : null);
+                if (!target) return fail(res, 403, 'forbidden', 'Solo repartidores.');
+                const range = parseDateRange(body);
+                if (!range.ok) return fail(res, 400, range.code, range.error);
+                const q = [Query.equal('driverUserId', target), Query.equal('status', ['delivered', 'cancelled', 'delivery_failed']), Query.orderDesc('$createdAt'), Query.limit(200)];
+                if (range.from) q.push(Query.greaterThanEqual('$createdAt', range.from));
+                if (range.to) q.push(Query.lessThanEqual('$createdAt', range.to));
+                const rows = (await db.listRows({ databaseId: DB, tableId: ORDERS, queries: q })).rows.filter((o) => (isDriver ? driverCan(o) : staffCan(o)));
+                const totals = { delivered: 0, cancelled: 0, failed: 0, earnings: 0, tips: 0 };
+                const byDay = {}, list = [];
+                for (const o of rows) {
+                    if (o.status === 'cancelled') { totals.cancelled++; continue; }
+                    if (o.status === 'delivery_failed') { totals.failed++; continue; }
+                    const f = splitFinance(o, { platformPct: PLATFORM_PCT, driverPct: DRIVER_PCT });
+                    totals.delivered++; totals.earnings = Math.round((totals.earnings + f.driverEarning) * 100) / 100; totals.tips = Math.round((totals.tips + f.tip) * 100) / 100;
+                    const day = String(o.$updatedAt || o.$createdAt || '').slice(0, 10);
+                    byDay[day] = Math.round(((byDay[day] || 0) + f.driverEarning) * 100) / 100;
+                    if (list.length < 50) list.push({ orderId: o.$id, at: o.$updatedAt || o.$createdAt, earning: f.driverEarning, tip: f.tip, deliveryFee: f.deliveryFee });
+                }
+                return res.json({ totals, byDay, deliveries: list, config: { driverPct: DRIVER_PCT }, payouts: 'not_implemented', truncated: rows.length >= 200 });
+            }
+
+            case 'expireAssignments': {
+                // Asignaciones sin respuesta del repartidor dentro del tiempo limite: se liberan, se avisa y se intenta con otro.
+                const denied = needStaff();
+                if (denied) return denied;
+                if (!(ASSIGNMENT_TIMEOUT_SECONDS > 0)) return res.json({ enabled: false, expired: [] });
+                const pend = (await db.listRows({ databaseId: DB, tableId: ORDERS, queries: [Query.equal('status', ACTIVE_DELIVERY), Query.limit(200)] })).rows.filter((o) => staffCan(o) && assignmentExpired(o, ASSIGNMENT_TIMEOUT_SECONDS));
+                const expired = [];
+                for (const o of pend) {
+                    // Candado por pedido + repartidor: dos staff refrescando a la vez no la expiran dos veces.
+                    const got = await takeLock('timeout', o.$id, o.driverUserId, { orderId: o.$id, type: 'driver_timeout', from: o.status, to: o.status, actorId: 'system', actorRole: 'system', driverUserId: o.driverUserId }, String(o.$updatedAt || ''));
+                    if (got === false) continue;
+                    const prev = o.driverUserId;
+                    await db.updateRow({ databaseId: DB, tableId: ORDERS, rowId: o.$id, data: { driverUserId: null, driverName: null, driverResponse: null, driverLatitude: null, driverLongitude: null } });
+                    await notify(prev, { title: 'Solicitud vencida', body: `El pedido #${String(o.$id).slice(-6)} se reasignó por falta de respuesta.`, data: { type: 'driver_timeout', orderId: o.$id } });
+                    const re = await autoAssign({ ...o, driverUserId: null }, prev).catch(() => false);
+                    if (!re) await notifyStaff({ title: 'Pedido sin repartidor', body: `El pedido #${String(o.$id).slice(-6)} quedó sin repartidor por tiempo vencido.`, data: { type: 'driver_timeout', orderId: o.$id } }, storeOf(o));
+                    expired.push({ orderId: o.$id, reassigned: re });
+                }
+                return res.json({ enabled: true, timeoutSeconds: ASSIGNMENT_TIMEOUT_SECONDS, expired });
             }
 
             case 'driverHistory': {
@@ -754,7 +925,7 @@ export default async ({ req, res, log, error }) => {
                 const rows = (await db.listRows({
                     databaseId: DB, tableId: ORDERS,
                     queries: [Query.equal('driverUserId', body.driverUserId), Query.orderDesc('$createdAt'), Query.limit(100)]
-                })).rows;
+                })).rows.filter(staffCan);
                 const stats = { delivered: 0, failed: 0, cancelled: 0, active: 0 };
                 for (const o of rows) {
                     if (o.status === 'delivered') stats.delivered++;

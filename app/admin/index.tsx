@@ -47,7 +47,8 @@ import {
     getOrderHistory,
     isStaleOrderError,
     listDrivers,
-    listStaffOrders
+    listStaffOrders,
+    expireAssignments
 } from "@/lib/services/staff.service";
 
 const EVENT_LABELS: Record<string, string> = {
@@ -91,6 +92,8 @@ const AdminOrders = () => {
         const seq = ++requestSeq.current;
         try {
             setError(null);
+            // V16: libera asignaciones vencidas (solo hace algo si el servidor tiene ASSIGNMENT_TIMEOUT_SECONDS). Mejor esfuerzo.
+            try { await expireAssignments(); } catch { /* mejor esfuerzo */ }
             const [list, drv] = await Promise.all([
                 listStaffOrders({ status: filters.status, ...dateRangeFor(filters.preset), query: normalizeOrderQuery(filters.search) }),
                 listDrivers()

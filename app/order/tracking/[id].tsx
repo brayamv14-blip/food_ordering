@@ -15,6 +15,8 @@ import { getRestaurant } from "@/lib/domain/restaurant";
 import { fractionAlongSegment, pointAlongRoute } from "@/lib/domain/polyline";
 import { isDemoAutopilotEnabled } from "@/lib/services/payments.service";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
+import { estimateEtaMinutes, formatEta } from "@/lib/domain/eta";
+import { getStoreInfo } from "@/lib/services/store.service";
 
 const TrackingScreen = () => {
     const { id } = useLocalSearchParams<{ id: string }>();
@@ -29,7 +31,7 @@ const TrackingScreen = () => {
         () => getRestaurant()?.location ?? (destination ? { latitude: destination.latitude - 0.012, longitude: destination.longitude - 0.012 } : null),
         [destination]
     );
-    const isDemoTrip = isDemoAutopilotEnabled() && !!order?.driverName?.includes("(demo)") && order?.rawStatus === "on_the_way";
+    const isDemoTrip = isDemoAutopilotEnabled() && (order?.driverUserId?.startsWith("demo-driver-") ?? !!order?.driverName?.includes("(demo)")) && order?.rawStatus === "on_the_way";
     const demoRoute = useRoute(isDemoTrip ? restaurantLoc : null, isDemoTrip ? destination : null);
     const driver = useMemo(() => {
         if (!rawDriver || !isDemoTrip || !restaurantLoc || !destination || !demoRoute?.ok) return rawDriver;
@@ -38,6 +40,12 @@ const TrackingScreen = () => {
     }, [rawDriver, isDemoTrip, restaurantLoc, destination, demoRoute]);
     const realRoute = useRoute(isDemoTrip ? null : driver, destination);
     const route = isDemoTrip ? demoRoute : realRoute;
+    const [prepMinutes, setPrepMinutes] = useState<number | null>(null);
+    useEffect(() => {
+        let alive = true;
+        getStoreInfo().then((i) => { if (alive && i) setPrepMinutes(i.prepMinutes); });
+        return () => { alive = false; };
+    }, []);
     const lastUpdate = useMemo(() => describeAge(order?.driverUpdatedAt), [order?.driverUpdatedAt]);
     // Se recalcula cada 30 s para que "actualizada" pase a "antigua" aunque no lleguen datos nuevos.
     const [now, setNow] = useState(() => new Date());
@@ -118,6 +126,11 @@ const TrackingScreen = () => {
                 <Text className="small-regular text-gray-200 mt-1" numberOfLines={2}>
                     Destino: <Text className="paragraph-semibold text-dark-100">{order.deliveryAddress?.line ?? "No registrado"}</Text>
                 </Text>
+                {formatEta(estimateEtaMinutes({ status: order.status, prepMinutes, routeSeconds: route?.ok ? route.durationSeconds : null })) && (
+                    <Text className="paragraph-bold text-dark-100 mt-1" accessibilityLiveRegion="polite">
+                        {formatEta(estimateEtaMinutes({ status: order.status, prepMinutes, routeSeconds: route?.ok ? route.durationSeconds : null }))} (estimado)
+                    </Text>
+                )}
                 <Text className="small-regular text-gray-200 mt-1">
                     Última ubicación: {lastUpdate ?? "sin datos todavía"}
                 </Text>

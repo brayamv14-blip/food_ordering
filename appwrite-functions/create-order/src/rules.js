@@ -33,10 +33,6 @@ function canActorTransition({ actor, isOwner, from, to, hasDriver = true, driver
     if (to === 'confirmed' && online && payment.status !== 'paid') {
         return { ok: false, code: 'payment_required', error: 'El pago en línea aún no está confirmado.' };
     }
-    // Reembolsos no se gestionan en la app: el cliente no cancela por su cuenta un pedido ya pagado.
-    if (actor === 'customer' && to === 'cancelled' && online && payment.status === 'paid') {
-        return { ok: false, code: 'refund_needed', error: 'Este pedido ya está pagado. Contacta al restaurante para cancelarlo y gestionar el reembolso.' };
-    }
     if ((to === 'on_the_way' || to === 'picked_up') && !hasDriver) {
         return { ok: false, code: 'driver_required', error: 'Asigna un repartidor antes de enviar el pedido.' };
     }
@@ -53,7 +49,8 @@ function canActorTransition({ actor, isOwner, from, to, hasDriver = true, driver
         return { ok: false, code: 'forbidden', error: 'Un repartidor no puede hacer ese cambio.' };
     }
     // cliente
-    if (isOwner && from === 'pending' && to === 'cancelled') return { ok: true };
+    // El cliente cancela solo antes de que se empiece a preparar; si ya pago en linea, el servidor reembolsa en automatico.
+    if (isOwner && (from === 'pending' || from === 'confirmed') && to === 'cancelled') return { ok: true };
     return { ok: false, code: 'forbidden', error: 'No tienes permiso para ese cambio.' };
 }
 
@@ -226,6 +223,10 @@ function toStaffOrderView(order, items = []) {
         id: order.$id,
         status: order.status,
         total: order.total,
+        tip: Number(order.tip) > 0 ? Number(order.tip) : 0,
+        couponCode: order.couponCode || null,
+        rating: typeof order.rating === 'number' ? order.rating : null,
+        driverRating: typeof order.driverRating === 'number' ? order.driverRating : null,
         createdAt: order.$createdAt,
         updatedAt: order.$updatedAt || null,
         customerName: order.customerName || '',
@@ -553,7 +554,7 @@ function buildPushRequest(accountId, message) {
 // Inventario, administracion y reportes (v8)
 // ====================================================================
 
-const ROLE_LABELS = ['admin', 'staff', 'driver'];
+const ROLE_LABELS = ['superadmin', 'admin', 'staff', 'driver'];
 const DEFAULT_LOW_STOCK = 5;
 
 /** Existencias de un producto: entero >= 0 si se controlan; null si el producto no controla inventario. */
@@ -667,6 +668,13 @@ function planStockAdjust(current, { set, delta }) {
 function validateRoleChange({ actorId, targetId, labels, targetCurrent = [] }) {
     if (!Array.isArray(labels) || labels.some((l) => !ROLE_LABELS.includes(l)) || new Set(labels).size !== labels.length) {
         return { ok: false, code: 'bad_roles', error: 'Roles inválidos.' };
+    }
+    // V15: el rol de superadministrador NUNCA se concede desde la app (solo con scripts/create-superadmin.mjs, con llave de servidor).
+    if (labels.includes('superadmin') && !targetCurrent.includes('superadmin')) {
+        return { ok: false, code: 'role_not_allowed', error: 'El rol de superadministrador no se puede asignar desde la aplicación.' };
+    }
+    if (targetCurrent.includes('superadmin') && !labels.includes('superadmin')) {
+        return { ok: false, code: 'role_not_allowed', error: 'No se puede quitar el rol de superadministrador desde la aplicación.' };
     }
     if (actorId === targetId && targetCurrent.includes('admin') && !labels.includes('admin')) {
         return { ok: false, code: 'self_demote', error: 'No puedes quitarte a ti mismo el rol de administrador.' };
@@ -1027,6 +1035,7 @@ function buildDashboard(orders, itemsByOrder = {}, { now = Date.now() } = {}) {
     const base = aggregateReport(orders, itemsByOrder);
     const todayKey = new Date(now).toISOString().slice(0, 10);
     let todayOrders = 0, cashCents = 0, onlineCents = 0, discountCents = 0, feeCents = 0, partialRefundCents = 0;
+    let tipCents = 0, couponOrders = 0;
     const byDriver = {};
     const unpaidOnline = [];
     const paymentCounts = {};
@@ -1039,6 +1048,8 @@ function buildDashboard(orders, itemsByOrder = {}, { now = Date.now() } = {}) {
             if (o.paymentMethod === 'online') onlineCents += cents(o.total); else cashCents += cents(o.total);
             discountCents += cents(o.discount || 0);
             feeCents += cents(o.deliveryFee || 0);
+            tipCents += cents(o.tip || 0);
+            if (o.couponCode) couponOrders++;
         }
         if (o.paymentStatus === 'paid' && Number(o.refundedAmount) > 0) partialRefundCents += cents(o.refundedAmount);
         if (o.paymentMethod === 'online' && ['pending', 'failed'].includes(o.paymentStatus || 'pending') && o.status !== 'cancelled') unpaidOnline.push(o.$id);
@@ -1056,6 +1067,9 @@ function buildDashboard(orders, itemsByOrder = {}, { now = Date.now() } = {}) {
         revenueByMethod: { cash: cashCents / 100, online: onlineCents / 100 },
         discounts: discountCents / 100,
         deliveryFees: feeCents / 100,
+        tips: tipCents / 100,
+        couponOrders,
+        ratings: summarizeRatings(orders),
         partialRefunds: partialRefundCents / 100,
         paymentCounts,
         unpaidOnlineOrders: unpaidOnline.length,
@@ -1070,6 +1084,131 @@ function buildDashboard(orders, itemsByOrder = {}, { now = Date.now() } = {}) {
     };
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// v14: horario, envio por distancia, cupones, propina, calificaciones y cancelacion del cliente.
+// Todo se calcula en el servidor; la app solo muestra lo que el servidor devuelve.
+// ---------------------------------------------------------------------------------------------
+const MAX_TIP = 200;
+
+function parseHm(v) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim());
+    if (!m) return null;
+    const h = Number(m[1]), mi = Number(m[2]);
+    if (h > 24 || mi > 59 || (h === 24 && mi !== 0)) return null;
+    return h * 60 + mi;
+}
+
+/**
+ * Horario de apertura. `hours`: "09:00-22:00" (o "22:00-02:00" que cruza medianoche); vacio = siempre abierto.
+ * `utcOffsetHours`: zona horaria del restaurante (CDMX = -6). `forceClosed`: cierre manual inmediato.
+ */
+function isOpenNow({ hours = '', utcOffsetHours = 0, now = Date.now(), forceClosed = false } = {}) {
+    const label = String(hours || '').trim();
+    if (forceClosed) return { open: false, hours: label, reason: 'closed_manually' };
+    if (!label) return { open: true, hours: '' };
+    const m = /^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/.exec(label);
+    const from = m ? parseHm(m[1]) : null, to = m ? parseHm(m[2]) : null;
+    if (from === null || to === null) return { open: true, hours: label, reason: 'bad_hours_config' };
+    const local = new Date(now + (Number(utcOffsetHours) || 0) * 3600000);
+    const minutes = local.getUTCHours() * 60 + local.getUTCMinutes();
+    const open = from === to ? true : from < to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
+    return { open, hours: label, ...(open ? {} : { reason: 'outside_hours' }) };
+}
+
+/** Envio = base + por km, con tope. Sin tarifa por km configurada se usa la tarifa fija. Devuelve pesos con centavos. */
+function computeDeliveryFee({ km, base, perKm, max, fallback = 5 } = {}) {
+    const per = Number(perKm);
+    if (!Number.isFinite(per) || per <= 0 || typeof km !== 'number' || !Number.isFinite(km)) return cents(fallback) / 100;
+    const b = Number.isFinite(Number(base)) ? Number(base) : fallback;
+    let fee = cents(b) + Math.round(per * Math.max(0, km) * 100);
+    const cap = Number(max);
+    if (Number.isFinite(cap) && cap > 0) fee = Math.min(fee, cents(cap));
+    return fee / 100;
+}
+
+/**
+ * Cupones desde la variable COUPONS: "BIENVENIDO:percent:10:0;ENVIOGRATIS:freeship:0:100;MENOS20:amount:20:150"
+ * (codigo:tipo:valor:minimo). Tipos: percent (% del subtotal), amount (monto fijo), freeship (envio gratis).
+ */
+function parseCoupons(raw) {
+    const out = {};
+    for (const part of String(raw || '').split(';')) {
+        const [code, type, value, min] = part.split(':').map((x) => (x === undefined ? '' : x.trim()));
+        if (!code || !['percent', 'amount', 'freeship'].includes(type)) continue;
+        const v = Number(value || 0), mn = Number(min || 0);
+        if (!Number.isFinite(v) || v < 0 || (type === 'percent' && v > 100)) continue;
+        out[code.toUpperCase()] = { type, value: v, min: Number.isFinite(mn) && mn > 0 ? mn : 0 };
+    }
+    return out;
+}
+
+function applyCoupon({ code, coupons = {}, subtotal = 0, deliveryFee = 0 } = {}) {
+    const key = typeof code === 'string' ? code.trim().toUpperCase() : '';
+    if (!key) return { ok: true, code: null, discount: 0 };
+    if (!/^[A-Z0-9_-]{3,24}$/.test(key)) return { ok: false, code: 'coupon_invalid', error: 'Cupón inválido.' };
+    const c = coupons[key];
+    if (!c) return { ok: false, code: 'coupon_invalid', error: 'Ese cupón no existe o ya venció.' };
+    if (c.min && cents(subtotal) < cents(c.min)) return { ok: false, code: 'coupon_min', error: `Este cupón requiere un pedido mínimo de $${c.min}.` };
+    let d = 0;
+    if (c.type === 'percent') d = Math.round((cents(subtotal) * c.value) / 100);
+    else if (c.type === 'amount') d = cents(c.value);
+    else d = cents(deliveryFee);
+    d = Math.min(d, cents(subtotal) + cents(deliveryFee));
+    return { ok: true, code: key, discount: d / 100, type: c.type };
+}
+
+/** Propina opcional al repartidor: 0..MAX_TIP, maximo 2 decimales. */
+function validateTip(tip, { max = MAX_TIP } = {}) {
+    if (tip === undefined || tip === null || tip === '') return { ok: true, tip: 0 };
+    if (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0) return { ok: false, code: 'bad_tip', error: 'Propina inválida.' };
+    const c = cents(tip);
+    if (c > cents(max)) return { ok: false, code: 'bad_tip', error: `La propina máxima es $${max}.` };
+    return { ok: true, tip: c / 100 };
+}
+
+/** Totales finales: subtotal + envio - descuentos (con tope) + propina. */
+function finalizeTotals({ subtotal, deliveryFee, baseDiscount = 0, couponDiscount = 0, tip = 0 } = {}) {
+    const gross = cents(subtotal) + cents(deliveryFee);
+    const discount = Math.min(cents(baseDiscount) + cents(couponDiscount), gross);
+    return {
+        subtotal: cents(subtotal) / 100,
+        deliveryFee: cents(deliveryFee) / 100,
+        discount: discount / 100,
+        tip: cents(tip) / 100,
+        total: (gross - discount + cents(tip)) / 100
+    };
+}
+
+/** Calificacion del pedido: 1..5 enteros, comentario opcional (max 300), calificacion del repartidor opcional. */
+function validateRating(input) {
+    if (!input || typeof input !== 'object') return { ok: false, code: 'bad_rating', error: 'Calificación inválida.' };
+    const isStar = (n) => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 5;
+    if (!isStar(input.rating)) return { ok: false, code: 'bad_rating', error: 'Elige de 1 a 5 estrellas.' };
+    if (input.driverRating !== undefined && input.driverRating !== null && !isStar(input.driverRating)) return { ok: false, code: 'bad_rating', error: 'La calificación del repartidor debe ser de 1 a 5.' };
+    const comment = typeof input.comment === 'string' ? input.comment.replace(/\s+/g, ' ').trim() : '';
+    if (comment.length > 300) return { ok: false, code: 'bad_rating', error: 'El comentario es demasiado largo (máx. 300).' };
+    return { ok: true, rating: input.rating, driverRating: isStar(input.driverRating) ? input.driverRating : null, comment };
+}
+
+/** Promedio y distribucion de calificaciones de pedidos entregados. */
+function summarizeRatings(orders) {
+    const dist = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let sum = 0, count = 0, dSum = 0, dCount = 0;
+    const recent = [];
+    for (const o of orders || []) {
+        if (!o || typeof o.rating !== 'number' || o.rating < 1 || o.rating > 5) continue;
+        dist[o.rating]++; sum += o.rating; count++;
+        if (typeof o.driverRating === 'number' && o.driverRating >= 1 && o.driverRating <= 5) { dSum += o.driverRating; dCount++; }
+        if (o.ratingComment) recent.push({ orderId: o.$id, rating: o.rating, comment: o.ratingComment, at: o.ratedAt || o.$updatedAt || null });
+    }
+    recent.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    return {
+        count, average: count ? Math.round((sum / count) * 100) / 100 : null,
+        driverAverage: dCount ? Math.round((dSum / dCount) * 100) / 100 : null,
+        distribution: dist, recentComments: recent.slice(0, 5)
+    };
+}
 
 // ---------------------------------------------------------------------------------------------
 // MODO DEMOSTRACION (DEMO_AUTOPILOT=true): avanza los pedidos solo y usa repartidores FICTICIOS.
@@ -1119,7 +1258,289 @@ function demoPosition({ status, progress, restaurant, destination }) {
     return null;
 }
 
+// =====================================================================================================
+// V15 — roles, tiendas (multitienda) y administracion de usuarios.
+// Rol = etiqueta de Auth (solo el servidor la escribe). Tienda = etiqueta `st<idTienda>` (tambien solo servidor).
+// NUNCA se usan las preferencias (`prefs`) para esto: el propio usuario puede editarlas.
+// Compatibilidad V14: un `admin` SIN etiqueta de tienda es administrador global (como en V14); `superadmin` es global siempre.
+// =====================================================================================================
+const DEFAULT_STORE_ID = 'main';
+const STORE_LABEL_RE = /^st([A-Za-z0-9]{1,34})$/;
+const CREATABLE_ROLES = { superadmin: ['admin', 'staff', 'driver', 'customer'], admin: ['staff', 'driver', 'customer'] };
+const STORE_REQUIRED_ROLES = ['admin', 'staff', 'driver'];
+
+const storeLabel = (storeId) => `st${storeId}`;
+/** Id de tienda guardado en las etiquetas (null si no tiene). Ignora la etiqueta `staff`. */
+function storeFromLabels(labels = []) {
+    for (const l of labels || []) {
+        if (l === 'staff') continue;
+        const m = STORE_LABEL_RE.exec(String(l));
+        if (m) return m[1];
+    }
+    return null;
+}
+/** Quien es el actor: rol, tienda y alcance. `global` => ve todas las tiendas. */
+function actorScope(labels = []) {
+    const l = Array.isArray(labels) ? labels : [];
+    const superadmin = l.includes('superadmin');
+    const admin = l.includes('admin');
+    // Personal/repartidor de V14 (sin etiqueta de tienda) pertenece a la tienda por omision: asi no pierde acceso al migrar.
+    const storeId = storeFromLabels(l) || (!admin && !superadmin && (l.includes('staff') || l.includes('driver')) ? DEFAULT_STORE_ID : null);
+    const role = superadmin ? 'superadmin' : admin ? 'admin' : l.includes('staff') ? 'staff' : l.includes('driver') ? 'driver' : 'customer';
+    return {
+        role, storeId, superadmin,
+        global: superadmin || (admin && !storeId),
+        isAdmin: superadmin || admin,
+        isStaff: superadmin || admin || l.includes('staff'),
+        isDriver: l.includes('driver')
+    };
+}
+/** Tienda a la que pertenece una fila (productos/pedidos anteriores a V15 no tienen `storeId` => tienda por omision). */
+const storeOf = (row, fallback = DEFAULT_STORE_ID) => (row && typeof row.storeId === 'string' && row.storeId ? row.storeId : fallback);
+/** ¿Puede el actor ver/operar datos de esa tienda? (global: todas; resto: solo la suya). */
+function canAccessStore(scope, storeId) {
+    if (!scope) return false;
+    if (scope.global) return true;
+    return !!scope.storeId && scope.storeId === (storeId || DEFAULT_STORE_ID);
+}
+const validStoreId = (id) => typeof id === 'string' && /^[A-Za-z0-9]{1,34}$/.test(id);
+
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
+/** Roles que `actor` puede crear (sin elevar privilegios). */
+const creatableRoles = (scope) => (scope && CREATABLE_ROLES[scope.role]) || [];
+
+/**
+ * Alta de usuario desde el panel. `store` = { exists, active } ya consultado por el servidor (o null si el rol no la necesita).
+ * Devuelve { ok, data:{name,email,role,storeId,phone}, password? } o { ok:false, status, code, error }.
+ */
+function validateUserCreate({ scope, input, store = null } = {}) {
+    const bad = (status, code, error) => ({ ok: false, status, code, error });
+    if (!scope || !scope.isAdmin) return bad(403, 'forbidden', 'No tienes permiso para crear usuarios.');
+    const i = input && typeof input === 'object' ? input : {};
+    const name = typeof i.name === 'string' ? i.name.trim().replace(/\s+/g, ' ') : '';
+    if (name.length < 2 || name.length > 80) return bad(400, 'bad_name', 'El nombre debe tener entre 2 y 80 caracteres.');
+    const email = typeof i.email === 'string' ? i.email.trim().toLowerCase() : '';
+    if (!EMAIL_RE.test(email) || email.length > 120) return bad(400, 'bad_email', 'Correo inválido.');
+    const role = typeof i.role === 'string' ? i.role : 'customer';
+    if (![...ROLE_LABELS, 'customer'].includes(role)) return bad(400, 'bad_role', 'Rol inválido.');
+    if (!creatableRoles(scope).includes(role)) return bad(403, 'role_not_allowed', 'No puedes crear usuarios con ese rol.');
+    let storeId = typeof i.storeId === 'string' && i.storeId ? i.storeId : null;
+    if (!scope.global) {
+        // Administrador de tienda: solo su tienda; si manda otra se rechaza (no se corrige en silencio).
+        if (storeId && storeId !== scope.storeId) return bad(403, 'store_forbidden', 'Solo puedes crear usuarios en tu tienda.');
+        storeId = scope.storeId;
+    }
+    if (STORE_REQUIRED_ROLES.includes(role) && !storeId) return bad(400, 'store_required', 'Ese rol necesita una tienda.');
+    if (storeId && !validStoreId(storeId)) return bad(400, 'bad_store', 'Tienda inválida.');
+    if (storeId) {
+        if (!store || !store.exists) return bad(422, 'store_not_found', 'La tienda no existe.');
+        if (store.active === false) return bad(422, 'store_inactive', 'La tienda está inactiva.');
+    }
+    let password = null;
+    if (i.password !== undefined && i.password !== null && i.password !== '') {
+        if (typeof i.password !== 'string' || i.password.length < 8 || i.password.length > 128) return bad(400, 'weak_password', 'La contraseña debe tener entre 8 y 128 caracteres.');
+        password = i.password;
+    }
+    const phone = typeof i.phone === 'string' && i.phone.trim() ? i.phone.trim().slice(0, 20) : null;
+    return { ok: true, data: { name, email, role, storeId, phone }, password };
+}
+
+/** Edicion de datos / rol / tienda de un usuario existente. */
+function validateUserUpdate({ scope, actorId, targetId, targetLabels = [], input, store = null } = {}) {
+    const bad = (status, code, error) => ({ ok: false, status, code, error });
+    if (!scope || !scope.isAdmin) return bad(403, 'forbidden', 'No tienes permiso para editar usuarios.');
+    const target = actorScope(targetLabels);
+    if (target.superadmin && !scope.superadmin) return bad(403, 'role_not_allowed', 'No puedes modificar a un superadministrador.');
+    if (!scope.global && target.global) return bad(403, 'store_forbidden', 'Ese usuario no pertenece a tu tienda.');
+    if (!scope.global && target.storeId !== scope.storeId) return bad(403, 'store_forbidden', 'Ese usuario no pertenece a tu tienda.');
+    const i = input && typeof input === 'object' ? input : {};
+    const out = {};
+    if (i.name !== undefined) {
+        const name = typeof i.name === 'string' ? i.name.trim().replace(/\s+/g, ' ') : '';
+        if (name.length < 2 || name.length > 80) return bad(400, 'bad_name', 'El nombre debe tener entre 2 y 80 caracteres.');
+        out.name = name;
+    }
+    let role = target.role;
+    if (i.role !== undefined) {
+        if (![...ROLE_LABELS, 'customer'].includes(i.role)) return bad(400, 'bad_role', 'Rol inválido.');
+        if (actorId === targetId && i.role !== target.role) return bad(403, 'self_role_change', 'No puedes cambiar tu propio rol.');
+        if (i.role !== target.role && !creatableRoles(scope).includes(i.role)) return bad(403, 'role_not_allowed', 'No puedes asignar ese rol.');
+        if (target.role === 'admin' && !scope.superadmin && i.role !== 'admin') return bad(403, 'role_not_allowed', 'Solo un superadministrador cambia el rol de un administrador.');
+        role = i.role;
+        out.role = role;
+    }
+    let storeId = target.storeId;
+    if (i.storeId !== undefined) {
+        if (actorId === targetId) return bad(403, 'self_store_change', 'No puedes cambiar tu propia tienda.');
+        if (!scope.global) return bad(403, 'store_forbidden', 'Solo un superadministrador cambia a un usuario de tienda.');
+        if (i.storeId !== null && !validStoreId(i.storeId)) return bad(400, 'bad_store', 'Tienda inválida.');
+        storeId = i.storeId;
+        out.storeId = storeId;
+    }
+    if (STORE_REQUIRED_ROLES.includes(role) && !storeId) return bad(400, 'store_required', 'Ese rol necesita una tienda.');
+    if (out.storeId) {
+        if (!store || !store.exists) return bad(422, 'store_not_found', 'La tienda no existe.');
+        if (store.active === false) return bad(422, 'store_inactive', 'La tienda está inactiva.');
+    }
+    if (i.phone !== undefined) out.phone = typeof i.phone === 'string' ? i.phone.trim().slice(0, 20) : '';
+    return { ok: true, data: out, role, storeId };
+}
+
+/** Etiquetas finales del usuario: se conservan las ajenas a la app y se reescriben rol + tienda. */
+function composeLabels({ currentLabels = [], role, storeId }) {
+    const foreign = (currentLabels || []).filter((l) => !ROLE_LABELS.includes(l) && !STORE_LABEL_RE.test(l));
+    const labels = [...foreign];
+    if (role && role !== 'customer') labels.push(role);
+    if (storeId) labels.push(storeLabel(storeId));
+    return labels;
+}
+/** El usuario puede ver al objetivo en el listado (aislamiento por tienda). */
+function canSeeUser(scope, targetLabels = []) {
+    if (!scope || !scope.isAdmin) return false;
+    if (scope.global) return true;
+    return actorScope(targetLabels).storeId === scope.storeId;
+}
+
+/** Datos de una tienda (alta/edicion). `partial` en edicion. Solo campos conocidos, con tipos y rangos. */
+function validateStoreInput(input, { partial = false } = {}) {
+    const bad = (code, error) => ({ ok: false, code, error });
+    const i = input && typeof input === 'object' ? input : {};
+    const d = {};
+    const text = (k, max, { required = false } = {}) => {
+        if (i[k] === undefined) return required && !partial ? bad('bad_store', `Falta ${k}.`) : null;
+        if (typeof i[k] !== 'string' || i[k].trim().length > max || (required && i[k].trim().length < 2)) return bad('bad_store', `Campo inválido: ${k}.`);
+        d[k] = i[k].trim();
+        return null;
+    };
+    const num = (k, min, max) => {
+        if (i[k] === undefined || i[k] === null) return null;
+        const n = Number(i[k]);
+        if (!Number.isFinite(n) || n < min || n > max) return bad('bad_store', `Campo inválido: ${k}.`);
+        d[k] = n;
+        return null;
+    };
+    for (const e of [text('name', 80, { required: true }), text('description', 300), text('imageUrl', 300), text('address', 200), text('phone', 20), text('openHours', 20), text('coupons', 500)]) if (e) return e;
+    for (const e of [num('latitude', -90, 90), num('longitude', -180, 180), num('deliveryFee', 0, 10000), num('deliveryFeeBase', 0, 10000), num('deliveryFeePerKm', 0, 10000), num('deliveryFeeMax', 0, 10000), num('deliveryRadiusKm', 0, 500), num('prepMinutes', 1, 240)]) if (e) return e;
+    if (d.openHours && d.openHours !== '' && !/^\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}$/.test(d.openHours)) return bad('bad_store', 'Horario inválido (usa HH:MM-HH:MM).');
+    if (d.imageUrl && !/^https:\/\//.test(d.imageUrl)) return bad('bad_store', 'La imagen debe ser una URL https.');
+    for (const k of ['active', 'closed']) {
+        if (i[k] === undefined) continue;
+        if (typeof i[k] !== 'boolean') return bad('bad_store', `Campo inválido: ${k}.`);
+        d[k] = i[k];
+    }
+    if (partial && Object.keys(d).length === 0) return bad('bad_store', 'No hay cambios.');
+    return { ok: true, data: d };
+}
+/** Config efectiva de una tienda: lo que defina su fila manda; lo demas cae a las variables de entorno (V14). */
+function storeConfig(row, env = {}) {
+    const r = row || {};
+    const pick = (v, fb) => (v === undefined || v === null || v === '' ? fb : v);
+    return {
+        hours: pick(r.openHours, env.hours || ''),
+        forceClosed: r.closed === true || (!row && env.forceClosed === true),
+        prepMinutes: Number(r.prepMinutes) > 0 ? Number(r.prepMinutes) : env.prepMinutes,
+        feeBase: pick(r.deliveryFeeBase, env.feeBase), feePerKm: pick(r.deliveryFeePerKm, env.feePerKm), feeMax: pick(r.deliveryFeeMax, env.feeMax),
+        fallbackFee: Number.isFinite(Number(r.deliveryFee)) && r.deliveryFee !== undefined && r.deliveryFee !== null ? Number(r.deliveryFee) : env.fallbackFee,
+        radiusKm: pick(r.deliveryRadiusKm, env.radiusKm),
+        latitude: pick(r.latitude, env.latitude), longitude: pick(r.longitude, env.longitude),
+        coupons: typeof r.coupons === 'string' && r.coupons.trim() ? r.coupons : env.coupons
+    };
+}
+/** Vista publica de una tienda (clientes): nunca expone configuracion interna. */
+function toStoreView(row, openState = null) {
+    return {
+        id: row.$id, name: row.name, description: row.description ?? '', imageUrl: row.imageUrl ?? '', address: row.address ?? '', phone: row.phone ?? '',
+        active: row.active !== false, ...(openState ? { open: openState.open, hours: openState.hours || '' } : {})
+    };
+}
+
+// ======================================================================= V16: finanzas, cuenta de repartidor, OTP, tiempo limite
+/**
+ * Reparto financiero de UN pedido entregado (pura, en centavos para no acumular errores de punto flotante).
+ *   neto de productos = subtotal - descuento
+ *   comision de plataforma = neto * platformPct / 100
+ *   ingreso de tienda = neto - comision
+ *   ganancia del repartidor = envio * driverPct / 100 + propina (la propina es 100% del repartidor)
+ * Si hubo reembolso parcial o total, todo se escala por la parte no reembolsada. NO mueve dinero: solo calcula/registra.
+ * Los porcentajes salen de la configuracion del servidor (nunca del cliente); sin configurar valen 0.
+ */
+const fin100 = (n) => Math.round((Number(n) || 0) * 100);
+function splitFinance(order, cfg = {}) {
+    const pct = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0; };
+    const platformPct = pct(cfg.platformPct), driverPct = pct(cfg.driverPct);
+    const subtotal = fin100(order.subtotal), fee = fin100(order.deliveryFee), discount = fin100(order.discount), tip = fin100(order.tip);
+    const total = fin100(order.total);
+    const refunded = Math.min(total, fin100(order.refundedAmount));
+    const keep = total > 0 ? (total - refunded) / total : 1;
+    const net = Math.max(0, subtotal - discount);
+    const commission = Math.round(net * platformPct / 100);
+    const driver = Math.round(fee * driverPct / 100) + tip;
+    const scale = (c) => Math.round(c * keep);
+    const out = {
+        subtotal, deliveryFee: fee, discount, tip, total, refunded,
+        platformCommission: scale(commission),
+        storeRevenue: scale(net - commission),
+        driverEarning: order.driverUserId ? scale(driver) : 0
+    };
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v / 100]));
+}
+
+/** Agrega el reparto financiero de pedidos ENTREGADOS por tienda, por repartidor y por dia. */
+function aggregateFinance(orders, cfgFor = () => ({})) {
+    const sum = () => ({ orders: 0, total: 0, platformCommission: 0, storeRevenue: 0, driverEarning: 0, deliveryFee: 0, tips: 0, refunded: 0 });
+    const add = (a, f) => { a.orders++; a.total += f.total; a.platformCommission += f.platformCommission; a.storeRevenue += f.storeRevenue; a.driverEarning += f.driverEarning; a.deliveryFee += f.deliveryFee; a.tips += f.tip; a.refunded += f.refunded; };
+    const round = (a) => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, k === 'orders' ? v : Math.round(v * 100) / 100]));
+    const totals = sum(), byStore = {}, byDriver = {}, byDay = {};
+    for (const o of orders) {
+        if (o.status !== 'delivered') continue;
+        const f = splitFinance(o, cfgFor(o));
+        add(totals, f);
+        add((byStore[o.storeId || 'main'] ||= sum()), f);
+        if (o.driverUserId) add((byDriver[o.driverUserId] ||= { ...sum(), name: o.driverName || 'Repartidor' }), f);
+        const day = String(o.$updatedAt || o.$createdAt || '').slice(0, 10);
+        if (day) add((byDay[day] ||= sum()), f);
+    }
+    const fix = (m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, round(v)]));
+    return { totals: round(totals), byStore: fix(byStore), byDriver: Object.fromEntries(Object.entries(byDriver).map(([k, v]) => [k, { ...round(v), name: v.name }])), byDay: fix(byDay) };
+}
+
+/** Estado de la cuenta de repartidor: pending (solicitud), approved, suspended (cuenta desactivada) o null (no es repartidor). */
+const DRIVER_PENDING_LABEL = 'pdriver';
+function driverAccountState(labels = [], active = true) {
+    const l = Array.isArray(labels) ? labels : [];
+    if (l.includes(DRIVER_PENDING_LABEL)) return active === false ? 'suspended' : 'pending';
+    if (l.includes('driver')) return active === false ? 'suspended' : 'approved';
+    return null;
+}
+/** Valida la solicitud de alta de repartidor (la hace una cuenta de cliente). */
+function validateDriverApplication(input = {}) {
+    const phone = typeof input.phone === 'string' ? input.phone.replace(/[^\d+]/g, '') : '';
+    if (phone.replace(/\D/g, '').length < 10) return { ok: false, code: 'bad_phone', error: 'Escribe un teléfono de 10 dígitos.' };
+    const vehicle = typeof input.vehicle === 'string' ? input.vehicle.trim().slice(0, 40) : '';
+    if (!['bicicleta', 'moto', 'auto', 'a_pie'].includes(vehicle)) return { ok: false, code: 'bad_vehicle', error: 'Elige un vehículo válido.' };
+    const storeId = typeof input.storeId === 'string' && input.storeId ? input.storeId : null;
+    if (storeId && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,35}$/.test(storeId)) return { ok: false, code: 'bad_store', error: 'Tienda inválida.' };
+    const note = typeof input.note === 'string' ? input.note.trim().slice(0, 200) : '';
+    return { ok: true, data: { phone: phone.slice(0, 16), vehicle, storeId, note } };
+}
+
+/** Codigo de entrega (OTP): 4 digitos derivados de HMAC(secreto, pedido). `hmac` lo inyecta la Function (node:crypto). */
+function deliveryCode(hmac, orderId) {
+    const hex = hmac(String(orderId));
+    return String(parseInt(hex.slice(0, 8), 16) % 10000).padStart(4, '0');
+}
+const OTP_MAX_FAILS = 5;
+
+/** ¿Una asignacion pendiente ya vencio? (tiempo limite de respuesta del repartidor; 0 = sin limite). */
+function assignmentExpired(order, timeoutSeconds, now = Date.now()) {
+    if (!(timeoutSeconds > 0) || !order.driverUserId || (order.driverResponse || 'accepted') !== 'pending') return false;
+    const since = Date.parse(order.$updatedAt || order.$createdAt || '');
+    return Number.isFinite(since) && now - since > timeoutSeconds * 1000;
+}
+
 export {
+    DEFAULT_STORE_ID, STORE_LABEL_RE, CREATABLE_ROLES, STORE_REQUIRED_ROLES, storeLabel, storeFromLabels, actorScope, storeOf, canAccessStore, validStoreId, creatableRoles, validateUserCreate, validateUserUpdate, composeLabels, canSeeUser, validateStoreInput, storeConfig, toStoreView,
+    MAX_TIP, isOpenNow, computeDeliveryFee, parseCoupons, applyCoupon, validateTip, finalizeTotals, validateRating, summarizeRatings,
     demoNextStep, demoDriverFor, demoPosition, DEMO_DRIVERS,
     TRANSITIONS, ACTIVE_DELIVERY, ASSIGNABLE, TERMINAL,
     canActorTransition, priceOrder, validateDriverPosition,
@@ -1131,5 +1552,6 @@ export {
     buildCheckoutSessionParams, formEncode, checkSessionPayment, paymentIntentId,
     parseStripeSignatureHeader, isFreshTimestamp, signedPayload, stripeEventToPayment, stripeRequest, isStripeCheckoutUrl,
     POOL_STATUSES, toPoolView, buildDriverCancelledNotification, DRIVER_STALE_MS, IN_TRANSIT, driverState, normalizeReason, planRefund, validateCategoryInput, buildAuditEntry, validateUserStatusChange, groupSales, buildDashboard,
-    buildStatusNotification, buildOrderReceivedNotification, buildAssignmentNotification, buildPaymentNotification, buildPushRequest
+    buildStatusNotification, buildOrderReceivedNotification, buildAssignmentNotification, buildPaymentNotification, buildPushRequest,
+    splitFinance, aggregateFinance, driverAccountState, validateDriverApplication, DRIVER_PENDING_LABEL, deliveryCode, OTP_MAX_FAILS, assignmentExpired
 };
