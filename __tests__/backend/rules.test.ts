@@ -7,9 +7,10 @@ const rules = require("../../appwrite-functions/shared/rules.js");
 describe("reglas del backend (Appwrite Functions)", () => {
     const base = { isOwner: true };
 
-    it("el cliente solo puede cancelar su pedido pendiente", () => {
+    it("el cliente solo puede cancelar su pedido antes de prepararse (pendiente o confirmado)", () => {
         expect(rules.canActorTransition({ actor: "customer", ...base, from: "pending", to: "cancelled" }).ok).toBe(true);
-        expect(rules.canActorTransition({ actor: "customer", ...base, from: "confirmed", to: "cancelled" }).ok).toBe(false);
+        expect(rules.canActorTransition({ actor: "customer", ...base, from: "confirmed", to: "cancelled" }).ok).toBe(true);
+        expect(rules.canActorTransition({ actor: "customer", ...base, from: "preparing", to: "cancelled" }).ok).toBe(false);
         expect(rules.canActorTransition({ actor: "customer", ...base, from: "on_the_way", to: "delivered" })).toMatchObject({ ok: false, code: "forbidden" });
         expect(rules.canActorTransition({ actor: "customer", isOwner: false, from: "pending", to: "cancelled" }).ok).toBe(false);
     });
@@ -213,9 +214,12 @@ describe("reglas del backend (Appwrite Functions)", () => {
             expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed", payment: { method: "cash_on_delivery", status: "not_required" } }).ok).toBe(true);
             expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "confirmed" }).ok).toBe(true);
         });
-        it("el cliente no cancela por su cuenta un pedido pagado (reembolso fuera de la app)", () => {
-            expect(rules.canActorTransition({ actor: "customer", ...base, to: "cancelled", payment: { method: "online", status: "paid" } })).toMatchObject({ ok: false, code: "refund_needed" });
+        it("el cliente cancela antes de prepararse (con reembolso automático si ya pagó), no después", () => {
+            expect(rules.canActorTransition({ actor: "customer", ...base, to: "cancelled", payment: { method: "online", status: "paid" } }).ok).toBe(true);
             expect(rules.canActorTransition({ actor: "customer", ...base, to: "cancelled", payment: { method: "online", status: "pending" } }).ok).toBe(true);
+            expect(rules.canActorTransition({ actor: "customer", ...base, from: "confirmed", to: "cancelled", payment: { method: "online", status: "paid" } }).ok).toBe(true);
+            expect(rules.canActorTransition({ actor: "customer", ...base, from: "preparing", to: "cancelled" }).ok).toBe(false);
+            expect(rules.canActorTransition({ actor: "customer", ...base, isOwner: false, to: "cancelled" }).ok).toBe(false);
             expect(rules.canActorTransition({ actor: "staff", isOwner: false, from: "pending", to: "cancelled", payment: { method: "online", status: "paid" } }).ok).toBe(true);
         });
         it("arma la sesión de Stripe Checkout con el total del servidor (centavos, MXN)", () => {

@@ -46,6 +46,14 @@ export interface Order {
     receivedAt: string | null;
     /** Importe ya reembolsado (reembolsos parciales); 0 si ninguno. */
     refundedAmount: number;
+    /** Propina al repartidor (0 si no hubo) y cupon aplicado. */
+    tip: number;
+    couponCode: string | null;
+    /** Calificacion del pedido (1-5) y del repartidor; null si aun no califica. */
+    rating: number | null;
+    driverRating: number | null;
+    ratingComment: string | null;
+    driverUserId: string | null;
     items: OrderItem[];
 }
 
@@ -127,6 +135,12 @@ export function mapOrderRow(row: Row, itemRows: Row[] = []): Order {
         driverUpdatedAt: str(row.driverUpdatedAt) || null,
         receivedAt: str(row.receivedAt) || null,
         refundedAmount: Math.max(0, num(row.refundedAmount)),
+        tip: Math.max(0, num(row.tip)),
+        couponCode: str(row.couponCode) || null,
+        rating: toFiniteNumber(row.rating),
+        driverRating: toFiniteNumber(row.driverRating),
+        ratingComment: str(row.ratingComment) || null,
+        driverUserId: str(row.driverUserId) || null,
         items: itemRows.map(mapOrderItemRow)
     };
 }

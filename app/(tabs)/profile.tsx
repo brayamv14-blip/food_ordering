@@ -467,6 +467,22 @@ const Profile = () => {
                         <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
                     </TouchableOpacity>
                 )}
+                {!roles.driver && !roles.staff && !roles.admin && (
+                    <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => router.push("/driver/apply" as never)}
+                        className="mb-3 flex-row items-center justify-between rounded-2xl border border-gray-100 bg-white p-4 shadow-sm"
+                        accessibilityRole="button"
+                    >
+                        <View className="flex-row items-center">
+                            <View className="h-11 w-11 items-center justify-center rounded-full bg-purple-50">
+                                <Ionicons name="bicycle-outline" size={22} color="#8B5CF6" />
+                            </View>
+                            <Text className="ml-3 text-base font-bold text-dark-100">Quiero ser repartidor</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={21} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
                 {roles.driver && (
                     <TouchableOpacity
                         activeOpacity={0.8}

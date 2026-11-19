@@ -51,6 +51,10 @@ const CATEGORIES =
 const AUDIT =
     process.env.APPWRITE_AUDIT_TABLE_ID ?? 'audit_log';
 
+// v15: tiendas (multitienda). Debe coincidir con STORES_TABLE_ID de las Functions.
+const STORES =
+    process.env.APPWRITE_STORES_TABLE_ID ?? 'stores';
+
 const apply = process.argv.includes('--apply');
 const rollback = process.argv.includes('--rollback');
 
@@ -90,6 +94,8 @@ export const PLAN = {
         label: 'orders',
 
         columns: [
+            // v15: tienda del pedido (multitienda). Los pedidos anteriores sin valor cuentan como la tienda "main".
+            str('storeId', 36),
             flt('subtotal', 0, 1e7),
             str('clientRequestId', 64),
             str('customerName', 80),
@@ -111,6 +117,13 @@ export const PLAN = {
             dt('receivedAt'),
             // v11: importe ya reembolsado (reembolsos parciales). null/0 = ninguno.
             flt('refundedAmount', 0, 1e7),
+            // v14: propina al repartidor, cupon aplicado y calificacion del cliente (solo las escriben las Functions).
+            flt('tip', 0, 1000),
+            str('couponCode', 24),
+            int('rating', 1, 5),
+            int('driverRating', 1, 5),
+            str('ratingComment', 300),
+            dt('ratedAt'),
 
             // Estado del pago verificado únicamente por el servidor.
             str('paymentStatus', 20),
@@ -149,6 +162,8 @@ export const PLAN = {
 
         // available permite marcar productos como agotados.
         columns: [
+            // v15: tienda dueña del producto (y de su stock). Sin valor = tienda "main".
+            str('storeId', 36),
             bool('available', true),
             // v8: existencias. Sin valor (null) = el producto no controla inventario.
             // Entero >= 0; las Functions lo modifican solo con operaciones atomicas (increment/decrement).
@@ -157,7 +172,7 @@ export const PLAN = {
             int('lowStockThreshold', 0, 1000000)
         ],
 
-        indexes: []
+        indexes: [{ key: 'idx_storeId', type: TablesDBIndexType.Key, columns: ['storeId'] }]
     },
 
     [MOVES]: {
@@ -168,6 +183,8 @@ export const PLAN = {
         isNew: true,
 
         columns: [
+            // v15: tienda del movimiento (opcional).
+            str('storeId', 36),
             str('orderId', 64),
             str('menuId', 36),
             str('type', 12),
@@ -222,9 +239,10 @@ export const PLAN = {
         label: 'categories',
 
         // v11: permite desactivar una categoria sin borrarla (la app oculta las inactivas).
-        columns: [bool('active', true)],
+        // v16: categorias por tienda. `storeId` vacio = categoria comun (heredada de V14/V15), visible para todas las tiendas.
+        columns: [bool('active', true), str('storeId', 36)],
 
-        indexes: []
+        indexes: [{ key: 'idx_storeId', type: TablesDBIndexType.Key, columns: ['storeId'] }]
     },
 
     [AUDIT]: {
@@ -247,6 +265,45 @@ export const PLAN = {
                 key: 'idx_action',
                 type: TablesDBIndexType.Key,
                 columns: ['action']
+            }
+        ]
+    },
+
+    [STORES]: {
+        label: 'stores',
+
+        // v15. Tabla nueva, SIN permisos de cliente: solo las Functions la leen y escriben (los clientes ven la vista publica
+        // que devuelve la accion `listStores` de create-order, sin configuracion interna).
+        isNew: true,
+
+        columns: [
+            str('name', 80),
+            str('description', 300),
+            str('imageUrl', 300),
+            str('address', 200),
+            str('phone', 20),
+            bool('active', true),
+            bool('closed', false),
+            str('openHours', 20),
+            flt('latitude', -90, 90),
+            flt('longitude', -180, 180),
+            flt('deliveryFee', 0, 10000),
+            flt('deliveryFeeBase', 0, 10000),
+            flt('deliveryFeePerKm', 0, 10000),
+            flt('deliveryFeeMax', 0, 10000),
+            flt('deliveryRadiusKm', 0, 500),
+            // v16: reparto financiero de la tienda (opcional; si falta se usan PLATFORM_COMMISSION_PCT y DRIVER_FEE_PCT del servidor).
+            flt('platformPct', 0, 100),
+            flt('driverPct', 0, 100),
+            int('prepMinutes', 1, 240),
+            str('coupons', 500)
+        ],
+
+        indexes: [
+            {
+                key: 'idx_active',
+                type: TablesDBIndexType.Key,
+                columns: ['active']
             }
         ]
     },

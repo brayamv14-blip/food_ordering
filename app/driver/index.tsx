@@ -5,6 +5,8 @@ import { Ionicons } from "@expo/vector-icons";
 
 import OrderStatusBadge from "@/components/OrderStatusBadge";
 import ReasonModal from "@/components/ReasonModal";
+import DriverEarningsPanel from "@/components/DriverEarningsPanel";
+import DeliveryCodeModal from "@/components/DeliveryCodeModal";
 import { buildNavigationUrl, getRestaurant } from "@/lib/domain/restaurant";
 import { startDriverBroadcaster } from "@/lib/domain/driverBroadcaster";
 import { getCurrentPosition, isPermissionFailure } from "@/lib/services/location";
@@ -29,10 +31,11 @@ const DriverDeliveries = () => {
     const [sharingId, setSharingId] = useState<string | null>(null);
     const [lastSent, setLastSent] = useState<string | null>(null);
     const [sharingError, setSharingError] = useState<string | null>(null);
-    const [tab, setTab] = useState<"pool" | "active" | "history">("active");
+    const [tab, setTab] = useState<"pool" | "active" | "history" | "earnings">("active");
     const [pool, setPool] = useState<PoolOrder[]>([]);
     const [poolOffline, setPoolOffline] = useState(false);
     // Motivo obligatorio para rechazar una asignacion o registrar una entrega fallida.
+    const [codeFor, setCodeFor] = useState<null | { order: StaffOrder; wrong: boolean }>(null);
     const [reasonFor, setReasonFor] = useState<null | { order: StaffOrder; kind: "reject" | "failed" }>(null);
     // Disponibilidad: por omision disponible; el servidor es quien la guarda.
     const [available, setAvailable] = useState(true);
@@ -48,6 +51,7 @@ const DriverDeliveries = () => {
     const load = useCallback(async () => {
         try {
             setError(null);
+            if (tab === "earnings") return; // el panel de ganancias carga sus propios datos
             if (tab === "pool") {
                 const r = await listAvailableOrders();
                 setPool(r.orders);
@@ -174,15 +178,26 @@ const DriverDeliveries = () => {
         }
     };
 
-    const setStatus = async (o: StaffOrder, to: "picked_up" | "on_the_way" | "delivered" | "delivery_failed", reason?: string) => {
+    const setStatus = async (o: StaffOrder, to: "picked_up" | "on_the_way" | "delivered" | "delivery_failed", reason?: string, deliveryCode?: string) => {
         if (busyId) return;
         setBusyId(o.id);
         try {
             if (to !== "on_the_way") stopSharing();
-            await changeOrderStatus(o.id, to, {}, reason);
+            // El código solo viaja cuando existe (OTP); sin él la llamada es idéntica a V15.
+            if (deliveryCode) await changeOrderStatus(o.id, to, {}, reason, deliveryCode);
+            else await changeOrderStatus(o.id, to, {}, reason);
+            setCodeFor(null);
             await load();
         } catch (e) {
-            Alert.alert("No se pudo completar", describeBackendError(e));
+            // V16: si el servidor exige el codigo de entrega (DELIVERY_OTP), se le pide al repartidor; el cliente se lo dicta.
+            if (to === "delivered" && (e as { code?: unknown })?.code === "bad_delivery_code") {
+                setCodeFor({ order: o, wrong: !!deliveryCode });
+            } else if (to === "delivered" && (e as { code?: unknown })?.code === "otp_locked") {
+                setCodeFor(null);
+                Alert.alert("Entrega bloqueada", describeBackendError(e));
+            } else {
+                Alert.alert("No se pudo completar", describeBackendError(e));
+            }
         } finally {
             setBusyId(null);
         }
@@ -221,7 +236,7 @@ const DriverDeliveries = () => {
             </TouchableOpacity>
 
             <View className="mx-5 mb-3 flex-row">
-                {(["pool", "active", "history"] as const).map((k) => (
+                {(["pool", "active", "history", "earnings"] as const).map((k) => (
                     <TouchableOpacity
                         key={k}
                         onPress={() => { setLoading(true); setTab(k); }}
@@ -229,7 +244,7 @@ const DriverDeliveries = () => {
                         accessibilityRole="button"
                         accessibilityState={{ selected: tab === k }}
                     >
-                        <Text className={tab === k ? "font-bold text-white" : "text-dark-100"}>{k === "pool" ? "Disponibles" : k === "active" ? "Activas" : "Historial"}</Text>
+                        <Text className={tab === k ? "font-bold text-white" : "text-dark-100"}>{k === "pool" ? "Disponibles" : k === "active" ? "Activas" : k === "history" ? "Historial" : "Ganancias"}</Text>
                     </TouchableOpacity>
                 ))}
             </View>
@@ -246,7 +261,9 @@ const DriverDeliveries = () => {
                 <View className="mx-5 mb-3 rounded-xl bg-red-50 p-3"><Text className="text-sm text-red-500">{error ?? sharingError}</Text></View>
             )}
 
-            {tab === "pool" ? (
+            {tab === "earnings" ? (
+                <DriverEarningsPanel />
+            ) : tab === "pool" ? (
                 <FlatList
                     data={pool}
                     keyExtractor={(o) => o.id}
@@ -366,6 +383,13 @@ const DriverDeliveries = () => {
             />
             )}
 
+            <DeliveryCodeModal
+                visible={!!codeFor}
+                wrong={!!codeFor?.wrong}
+                busy={!!busyId}
+                onClose={() => setCodeFor(null)}
+                onSubmit={(code) => { if (codeFor) void setStatus(codeFor.order, "delivered", undefined, code); }}
+            />
             <ReasonModal
                 visible={!!reasonFor}
                 title={reasonFor?.kind === "reject" ? "¿Por qué rechazas el pedido?" : "¿Por qué no se pudo entregar?"}

@@ -21,7 +21,7 @@ export function buildNavigationUrl(dest: unknown): string | null {
 }
 
 /** Mensaje claro para errores conocidos de validación del servidor al crear un pedido. */
-const SERVER_MESSAGE_CODES = new Set(["out_of_coverage", "coverage_unverified", "bad_address", "bad_coordinates", "payment_unavailable", "bad_phone"]);
+const SERVER_MESSAGE_CODES = new Set(["out_of_coverage", "coverage_unverified", "bad_address", "bad_coordinates", "payment_unavailable", "bad_phone", "restaurant_closed", "coupon_invalid", "coupon_min", "bad_tip", "rate_limited", "too_many_open_orders"]);
 export function friendlyServerError(error: unknown): string | null {
     const e = error as { code?: unknown; message?: unknown } | null;
     return e && typeof e.code === "string" && SERVER_MESSAGE_CODES.has(e.code) && typeof e.message === "string" ? e.message : null;

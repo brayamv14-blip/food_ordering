@@ -360,13 +360,22 @@ export const getMenu = async ({
     category,
     query,
     limit,
-    newest
+    newest,
+    storeId
 }: GetMenuParams): Promise<MenuItem[]> => {
     try {
         const queries: string[] = [];
 
         if (typeof limit === "number" && limit > 0) queries.push(Query.limit(limit));
         if (newest) queries.push(Query.orderDesc("$createdAt"));
+        // v15: catalogo por tienda. Los productos anteriores a V15 (sin storeId) pertenecen a la tienda "main".
+        if (storeId) {
+            queries.push(
+                storeId === "main"
+                    ? Query.or([Query.equal("storeId", ["main"]), Query.isNull("storeId")])
+                    : Query.equal("storeId", [storeId])
+            );
+        }
 
         if (category) {
             queries.push(
@@ -423,7 +432,11 @@ export const getMenu = async ({
 // OBTENER CATEGORÍAS
 // ======================================================
 
-export const getCategories = async (): Promise<Category[]> => {
+/** v16: con `storeId` solo devuelve las categorias de esa tienda y las comunes (sin `storeId`). Sin `storeId` => comportamiento V14/V15. */
+export const getCategories = async (storeArg?: string | null | Record<string, unknown>): Promise<Category[]> => {
+    // useAppwrite llama a fn({...params}): se acepta "tienda" o { storeId }.
+    const raw = typeof storeArg === "string" ? storeArg : storeArg && typeof storeArg === "object" ? (storeArg as { storeId?: unknown }).storeId : null;
+    const storeId = typeof raw === "string" && raw ? raw : null;
     try {
         const categories = await databases.listRows({
             databaseId: appwriteConfig.databaseId,
@@ -431,7 +444,10 @@ export const getCategories = async (): Promise<Category[]> => {
         });
 
         // Las categorias desactivadas por el admin no se muestran al cliente.
-        return categories.rows.filter((row) => (row as { active?: boolean }).active !== false).map((row) => ({
+        return categories.rows
+            .filter((row) => (row as { active?: boolean }).active !== false)
+            .filter((row) => { if (!storeId) return true; const s = (row as { storeId?: string | null }).storeId; return !s || s === storeId; })
+            .map((row) => ({
             $id: row.$id,
             $createdAt: row.$createdAt,
             $updatedAt: row.$updatedAt,

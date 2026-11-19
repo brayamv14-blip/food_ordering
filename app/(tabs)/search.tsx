@@ -4,6 +4,7 @@ import useAppwrite from "@/lib/useAppwrite";
 import {getCategories, getMenu} from "@/lib/appwrite";
 import {useLocalSearchParams} from "expo-router";
 import {useEffect} from "react";
+import useStoreSelection from "@/store/store.store";
 import CartButton from "@/components/CartButton";
 import cn from "clsx";
 import MenuCard from "@/components/MenuCard";
@@ -12,15 +13,23 @@ import {MenuItem} from "@/type";
 import Filter from "@/components/Filter";
 import SearchBar from "@/components/SearchBar";
 
+// v16: useAppwrite pasa un objeto de parámetros; "" = sin tienda.
+const fetchCategories = (p: { storeId: string }) => getCategories(p.storeId || undefined);
+
 const Search = () => {
     const { category, query } = useLocalSearchParams<{query: string; category: string}>()
 
-    const { data, refetch, loading, error } = useAppwrite({ fn: getMenu, params: { category,  query,  limit: 6, } });
-    const { data: categories, refetch: refetchCategories, error: categoriesError } = useAppwrite({ fn: getCategories });
+    // v16: el buscador respeta la tienda elegida (productos y categorias de esa tienda).
+    const storeEnabled = useStoreSelection((s) => s.enabled);
+    const storeId = useStoreSelection((s) => s.storeId);
+    const sid = storeEnabled && storeId ? storeId : "";
+    const { data, refetch, loading, error } = useAppwrite({ fn: getMenu, params: { category,  query,  limit: 6, ...(sid ? { storeId: sid } : {}) } });
+    const { data: categories, refetch: refetchCategories, error: categoriesError } = useAppwrite({ fn: fetchCategories, params: { storeId: sid } });
 
     useEffect(() => {
-        refetch({ category, query, limit: 6})
-    }, [category, query]);
+        refetch({ category, query, limit: 6, ...(sid ? { storeId: sid } : {}) })
+        refetchCategories({ storeId: sid })
+    }, [category, query, sid]);
 
     return (
         <SafeAreaView className="bg-white h-full">

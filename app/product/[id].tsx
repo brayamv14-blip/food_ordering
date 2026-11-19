@@ -32,6 +32,7 @@ import {
 } from "@/type";
 
 import { useCartStore } from "@/store/cart.store";
+import { loadFavorites, setFavorite } from "@/lib/services/favorites.service";
 
 const ProductDetails = () => {
     const {
@@ -69,6 +70,29 @@ const ProductDetails = () => {
         addItem,
         updateItem
     } = useCartStore();
+
+    const [isFav, setIsFav] = useState(false);
+    const [favBusy, setFavBusy] = useState(false);
+
+    useEffect(() => {
+        let alive = true;
+        if (id) loadFavorites().then((l) => { if (alive) setIsFav(l.includes(id)); });
+        return () => { alive = false; };
+    }, [id]);
+
+    const toggleFav = async () => {
+        if (!id || favBusy) return;
+        setFavBusy(true);
+        const next = !isFav;
+        setIsFav(next); // optimista; si falla se revierte
+        try {
+            await setFavorite(id, next);
+        } catch {
+            setIsFav(!next);
+        } finally {
+            setFavBusy(false);
+        }
+    };
 
     useEffect(() => {
         const loadProduct = async () => {
@@ -295,9 +319,19 @@ const ProductDetails = () => {
                         />
                     </TouchableOpacity>
 
-                    <Text className="flex-1 text-center h3-bold text-dark-100 mr-10">
+                    <Text className="flex-1 text-center h3-bold text-dark-100">
                         Product Details
                     </Text>
+
+                    <TouchableOpacity
+                        onPress={toggleFav}
+                        disabled={favBusy}
+                        className="size-10 rounded-full bg-white items-center justify-center"
+                        accessibilityRole="button"
+                        accessibilityLabel={isFav ? "Quitar de favoritos" : "Agregar a favoritos"}
+                    >
+                        <Ionicons name={isFav ? "heart" : "heart-outline"} size={25} color={isFav ? "#EF4444" : "#181C2E"} />
+                    </TouchableOpacity>
                 </View>
 
                 <View className="items-center justify-center mt-5 h-72">

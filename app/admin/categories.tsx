@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, FlatList, Switch, Text, TextInput, TouchableOpacity, View } from "react-native";
 
 import AdminShell, { useRoleGate } from "@/components/AdminShell";
+import AdminStoreFilter, { useAdminStoreFilter } from "@/components/AdminStoreFilter";
 import { AdminCategory, deleteCategory, listCategories, saveCategory, setCategoryActive } from "@/lib/services/admin.service";
 import { describeBackendError } from "@/lib/services/staff.service";
 
 /** CRUD de categorias (solo admin). El servidor valida nombre y bloquea borrar categorias en uso. */
 const Categories = () => {
     const allowed = useRoleGate("admin");
+    const sf = useAdminStoreFilter();
     const [items, setItems] = useState<AdminCategory[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -19,13 +21,13 @@ const Categories = () => {
     const load = useCallback(async () => {
         try {
             setError(null);
-            setItems(await listCategories());
+            setItems(await listCategories(sf.storeId || undefined));
         } catch (e) {
             setError(describeBackendError(e));
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [sf.storeId]);
     useEffect(() => { if (allowed) load(); }, [allowed, load]);
 
     const reset = () => { setEditing(null); setName(""); setDescription(""); };
@@ -34,7 +36,7 @@ const Categories = () => {
         if (busy) return;
         setBusy(true);
         try {
-            await saveCategory({ name: name.trim(), description: description.trim() }, editing ?? undefined);
+            await saveCategory({ name: name.trim(), description: description.trim() }, editing ?? undefined, sf.storeId || undefined);
             reset();
             await load();
         } catch (e) {
@@ -54,6 +56,7 @@ const Categories = () => {
 
     return (
         <AdminShell title="Categorías" allowed={allowed} loading={loading} error={error}>
+            {sf.isGlobal && <View className="mx-5"><AdminStoreFilter stores={sf.stores} value={sf.storeId} onChange={sf.setStoreId} allLabel="Todas / comunes" /></View>}
             <View className="mx-5 mb-3 rounded-2xl border border-gray-100 p-3">
                 <TextInput value={name} onChangeText={setName} placeholder="Nombre" maxLength={60} className="mb-2 rounded-xl border border-gray-200 px-3 py-2" />
                 <TextInput value={description} onChangeText={setDescription} placeholder="Descripción (opcional)" maxLength={200} className="mb-2 rounded-xl border border-gray-200 px-3 py-2" />
@@ -73,7 +76,7 @@ const Categories = () => {
                     <View className="mb-2 rounded-2xl border border-gray-100 bg-white p-3">
                         <View className="flex-row items-center justify-between">
                             <View className="flex-1 pr-2">
-                                <Text className="font-semibold text-dark-100">{c.name}</Text>
+                                <Text className="font-semibold text-dark-100">{c.name}{c.shared ? "  · común" : ""}</Text>
                                 {!!c.description && <Text className="text-xs text-gray-500">{c.description}</Text>}
                             </View>
                             <Switch value={c.active !== false} onValueChange={async (v) => {

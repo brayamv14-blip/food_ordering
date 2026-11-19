@@ -410,16 +410,19 @@ describe("historial y detalle", () => {
 });
 
 describe("cancelación y suscripción", () => {
-    it("solo cancela pedidos pendientes", async () => {
+    it("solo cancela pedidos pendientes o confirmados (antes de prepararse)", async () => {
         await cancelMyOrder({
             id: "a",
             status: "pending",
+        });
+        await cancelMyOrder({
+            id: "a",
+            status: "confirmed",
         });
 
         expect(mockCancel).toHaveBeenCalledWith("a");
 
         for (const status of [
-            "confirmed",
             "preparing",
             "on_the_way",
             "delivered",
@@ -433,7 +436,7 @@ describe("cancelación y suscripción", () => {
             });
         }
 
-        expect(mockCancel).toHaveBeenCalledTimes(1);
+        expect(mockCancel).toHaveBeenCalledTimes(2);
     });
 
     it("V13: en nativo también se suscribe y, si Realtime falla, devuelve undefined (queda el sondeo)", () => {

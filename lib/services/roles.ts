@@ -1,4 +1,5 @@
 import { account } from "@/lib/appwrite";
+import { Scope, scopeFromLabels } from "@/lib/domain/access";
 
 export interface Roles {
     /** Personal del restaurante (incluye a los administradores). */
@@ -15,7 +16,7 @@ export interface Roles {
  */
 export const rolesFromLabels = (labels: unknown): Roles => {
     const list = Array.isArray(labels) ? labels : [];
-    const admin = list.includes("admin");
+    const admin = list.includes("admin") || list.includes("superadmin");
     return { staff: admin || list.includes("staff"), driver: list.includes("driver"), admin };
 };
 
@@ -25,5 +26,15 @@ export async function getMyRoles(): Promise<Roles> {
         return rolesFromLabels((me as { labels?: unknown }).labels);
     } catch {
         return { staff: false, driver: false, admin: false };
+    }
+}
+
+/** V15: rol exacto y tienda (solo para decidir que mostrar; el servidor valida). */
+export async function getMyScope(): Promise<Scope> {
+    try {
+        const me = await account.get();
+        return scopeFromLabels((me as { labels?: unknown }).labels);
+    } catch {
+        return scopeFromLabels([]);
     }
 }

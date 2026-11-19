@@ -91,8 +91,8 @@ r = await ops(mk('u1', { orderId: oid, status: 'delivered' })); check('cliente n
 r = await ops(mk('staff1', { orderId: oid, status: 'confirmed', expectedStatus: 'pending', expectedUpdatedAt: o1.$updatedAt })); check('staff confirma con datos vigentes', r.s === 200 && o1.status === 'confirmed', r);
 r = await ops(mk('staff2', { orderId: oid, status: 'cancelled', reason: 'prueba', expectedStatus: 'pending' })); check('segundo empleado con datos viejos -> 409 stale_order', r.s === 409 && r.b.code === 'stale_order' && o1.status === 'confirmed', r);
 r = await ops(mk('staff2', { orderId: oid, status: 'preparing', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })); check('fecha de actualización vieja -> 409', r.s === 409 && r.b.code === 'stale_order', r);
-r = await ops(mk('u1', { orderId: oid, status: 'cancelled' })); check('cliente ya no cancela tras confirmar', r.s === 403 && o1.status === 'confirmed', r);
 r = await ops(mk('staff1', { orderId: oid, status: 'preparing' })); check('staff -> preparing', r.s === 200);
+r = await ops(mk('u1', { orderId: oid, status: 'cancelled' })); check('cliente ya no cancela cuando se está preparando', r.s >= 400 && o1.status === 'preparing', r);
 r = await ops(mk('staff1', { orderId: oid, status: 'on_the_way' })); check('sin repartidor -> driver_required', r.s === 409 && r.b.code === 'driver_required', r);
 
 // ---------- listOrders / filtros
@@ -192,7 +192,15 @@ r = await ops(mk('u1', { action: 'syncPayment', orderId: op.$id })); check('cobr
 check('al pagarse: push "Pago recibido" (una sola vez)', pushes().length === 1 && pushes()[0].title === 'Pago recibido' && pushes()[0].users[0] === 'u1', pushes());
 net.calls.length = 0;
 r = await ops(mk('u1', { action: 'syncPayment', orderId: op.$id })); check('verificar de nuevo no vuelve a consultar a Stripe ni a notificar', r.b.paymentStatus === 'paid' && net.calls.length === 0 && pushes().length === 1, r);
-r = await ops(mk('u1', { orderId: op.$id, status: 'cancelled' })); check('el cliente no cancela un pedido ya pagado -> refund_needed', (r.s === 409 || r.s === 403) && r.b.code === 'refund_needed', r);
+{ // v14: el cliente SI cancela antes de prepararse; si ya pago, el servidor reembolsa solo (Stripe) y cancela.
+  const rc = await createOrder(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] }))); const oc = store.orders.find((o) => o.$id === rc.b.orderId);
+  payInStripe(oc.stripeSessionId); await ops(mk('u1', { action: 'syncPayment', orderId: oc.$id }));
+  const before = Object.keys(net.stripe.refunds).length;
+  r = await ops(mk('u1', { orderId: oc.$id, status: 'cancelled' }));
+  check('v14: cliente cancela pedido pagado antes de prepararse -> reembolso automático', r.s === 200 && oc.status === 'cancelled' && oc.paymentStatus === 'refunded' && Object.keys(net.stripe.refunds).length === before + 1, [r, oc.status, oc.paymentStatus]);
+  r = await ops(mk('u1', { orderId: oc.$id, status: 'cancelled' })); check('v14: cancelar dos veces no reembolsa dos veces', r.s >= 400 && Object.keys(net.stripe.refunds).length === before + 1, r);
+  net.stripe.refunds = {}; net.stripe.refundKeys = {}; // deja el contador limpio para las pruebas de reembolso del personal
+}
 { // sesión de OTRO pedido no sirve como prueba de pago
   const t = store.orders.find((o) => o.paymentMethod === 'online' && o.paymentStatus === 'pending' && o.$id !== op.$id);
   check('(sin otros pedidos en línea pendientes todavía)', !t); }
@@ -668,7 +676,7 @@ if (po) { q = await two(mk('staff1', { orderId: po.$id, status: 'confirmed' }));
 {
 store.prefs = {};
 let q = await createOrder(mk('u1', other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] })));
-check('v10: pedido en línea responde paymentMethod=online, pending y la versión', q.s === 200 && q.b.paymentMethod === 'online' && q.b.paymentStatus === 'pending' && q.b.backend === 'v10' && !!q.b.checkoutUrl, q);
+check('v10: pedido en línea responde paymentMethod=online, pending y la versión', q.s === 200 && q.b.paymentMethod === 'online' && q.b.paymentStatus === 'pending' && q.b.backend === 'v15' && !!q.b.checkoutUrl, q);
 const saved = store.orders.find((o) => o.$id === q.b.orderId);
 check('v10: lo guardado coincide (online, pending, con sesión Stripe)', saved.paymentMethod === 'online' && saved.paymentStatus === 'pending' && !!saved.stripeSessionId, saved);
 const body2 = other({ paymentMethod: 'online', items: [{ menuId: 'm1', quantity: 1 }] });
@@ -677,7 +685,7 @@ check('v10: el reintento devuelve el mismo pedido y su método real (online)', a
 q = await createOrder(mk('u1', other({ items: [{ menuId: 'm1', quantity: 1 }] })));
 check('v10: efectivo responde cash_on_delivery / not_required', q.s === 200 && q.b.paymentMethod === 'cash_on_delivery' && q.b.paymentStatus === 'not_required', q);
 q = await createOrder(mk('u1', { action: 'diag' }));
-check('v10: diag devuelve solo booleanos y la versión (sin valores)', q.s === 200 && q.b.backend === 'v10' && typeof q.b.stripeKey === 'boolean' && !JSON.stringify(q.b).match(/sk_|whsec_|key_/), q);
+check('v10: diag devuelve solo booleanos y la versión (sin valores)', q.s === 200 && q.b.backend === 'v15' && typeof q.b.stripeKey === 'boolean' && !JSON.stringify(q.b).match(/sk_|whsec_|key_/), q);
 q = await createOrder(mk(null, { action: 'diag' }));
 check('v10: diag sin sesión -> 401', q.s === 401, q);
 const drvOrder = store.orders.find((o) => o.driverUserId && ['picked_up', 'on_the_way', 'ready', 'preparing', 'confirmed'].includes(o.status)) || null;
@@ -973,6 +981,53 @@ check('v11: queda un solo evento driver_claimed por pedido (quién aceptó)', ev
   payInStripe(dp.stripeSessionId);
   r = await opsDemo(mk('u1', { action: 'advanceDemo', orderId: dp.$id })); check('demo: pagado en Stripe -> paid y confirmed', dp.paymentStatus === 'paid' && dp.status === 'confirmed', [dp.paymentStatus, dp.status]);
   delete process.env.DEMO_AUTOPILOT; delete process.env.RESTAURANT_LATITUDE; delete process.env.RESTAURANT_LONGITUDE;
+}
+
+// ---------- v14: tienda, envio por distancia, cupones, propina, calificaciones
+{
+  Object.assign(process.env, { OPEN_HOURS: '09:00-22:00', RESTAURANT_UTC_OFFSET: '0', PREP_MINUTES: '20', COUPONS: 'BIENVENIDO:percent:10:0;ENVIO:freeship:0:0;GRANDE:amount:50:500', DELIVERY_FEE_BASE: '10', DELIVERY_FEE_PER_KM: '4', DELIVERY_FEE_MAX: '30', RESTAURANT_LATITUDE: '19.5', RESTAURANT_LONGITUDE: '-99.2', DELIVERY_RADIUS_KM: '50', TIP_MAX: '100' });
+  const co = (await import('./create-order/src/main.js?v14')).default;
+  const it1 = [{ menuId: 'm1', quantity: 2 }];
+  const asOpenNow = () => { const h = new Date().getUTCHours(); process.env.OPEN_HOURS = `${String(h).padStart(2, '0')}:00-${String((h + 1) % 24).padStart(2, '0')}:59`; };
+  process.env.OPEN_HOURS = '00:00-00:00'; // abierto siempre
+  const co2 = (await import('./create-order/src/main.js?v14b')).default;
+  r = await co2(mk('u1', { action: 'storeInfo' })); check('v14: storeInfo devuelve horario, preparación y cupones', r.s === 200 && r.b.prepMinutes === 20 && r.b.couponsEnabled === true && r.b.open === true, r);
+  r = await co2(mk('u1', { action: 'quote', items: it1, address: body().address, tip: 10, couponCode: 'bienvenido' }));
+  const sub = r.b.subtotal;
+  check('v14: cotización: envío por distancia (base+km, con tope), cupón % y propina', r.s === 200 && r.b.deliveryFee >= 10 && r.b.deliveryFee <= 30 && r.b.couponCode === 'BIENVENIDO' && Math.abs(r.b.couponDiscount - Math.round(sub * 10) / 100) < 0.011 && r.b.tip === 10 && Math.abs(r.b.total - (sub + r.b.deliveryFee - r.b.discount + 10)) < 0.011, r);
+  r = await co2(mk('u1', { action: 'quote', items: it1, address: body().address, couponCode: 'NOEXISTE' })); check('v14: cupón inexistente -> 422 coupon_invalid', r.s === 422 && r.b.code === 'coupon_invalid', r);
+  r = await co2(mk('u1', { action: 'quote', items: it1, address: body().address, couponCode: 'GRANDE' })); check('v14: cupón con mínimo no aplica en pedido chico -> coupon_min', r.s === 422 && r.b.code === 'coupon_min', r);
+  r = await co2(mk('u1', { action: 'quote', items: it1, address: body().address, tip: 5000 })); check('v14: propina por encima del máximo -> 400', r.s === 400 && r.b.code === 'bad_tip', r);
+  r = await co2(mk('u1', { action: 'quote', items: it1, address: body().address, tip: -3 })); check('v14: propina negativa -> 400', r.s === 400 && r.b.code === 'bad_tip', r);
+  r = await co2(mk('u1', other({ items: it1, tip: 10, couponCode: 'ENVIO', total: 0.01, deliveryFee: 0 })));
+  const o14 = store.orders.find((o) => o.$id === r.b.orderId);
+  check('v14: el pedido guarda propina, cupón y total calculados por el servidor (ignora importes del cliente)', r.s === 200 && o14.tip === 10 && o14.couponCode === 'ENVIO' && o14.deliveryFee > 0 && o14.total > 10 && Math.abs(o14.total - (o14.subtotal + o14.deliveryFee - o14.discount + 10)) < 0.011, o14);
+  r = await co2(mk('u1', other({ items: it1 }))); const o15 = store.orders.find((o) => o.$id === r.b.orderId);
+  check('v14: sin propina ni cupón no se envían columnas opcionales', r.s === 200 && !('tip' in o15) && !('couponCode' in o15), o15);
+  // cerrado
+  const h = new Date().getUTCHours(); process.env.OPEN_HOURS = `${String((h + 3) % 24).padStart(2, '0')}:00-${String((h + 4) % 24).padStart(2, '0')}:00`;
+  const coClosed = (await import('./create-order/src/main.js?v14c')).default;
+  r = await coClosed(mk('u1', other({ items: it1 }))); check('v14: fuera de horario no se crean pedidos -> 409 restaurant_closed', r.s === 409 && r.b.code === 'restaurant_closed', r);
+  r = await coClosed(mk('u1', { action: 'storeInfo' })); check('v14: storeInfo informa que está cerrado', r.s === 200 && r.b.open === false, r);
+  process.env.OPEN_HOURS = '00:00-00:00'; process.env.RESTAURANT_CLOSED = 'true';
+  const coManual = (await import('./create-order/src/main.js?v14d')).default;
+  r = await coManual(mk('u1', other({ items: it1 }))); check('v14: cierre manual (RESTAURANT_CLOSED) bloquea pedidos', r.s === 409 && r.b.code === 'restaurant_closed', r);
+  process.env.RESTAURANT_CLOSED = 'false';
+
+  // calificaciones
+  const dv = store.orders.find((o) => o.status === 'delivered' && o.userId === 'u1' && typeof o.rating !== 'number');
+  if (dv) {
+    r = await ops(mk('u2', { action: 'rateOrder', orderId: dv.$id, rating: 5 })); check('v14: otro cliente no califica pedido ajeno (404)', r.s === 404, r);
+    r = await ops(mk('u1', { action: 'rateOrder', orderId: dv.$id, rating: 9 })); check('v14: calificación fuera de 1-5 -> 400', r.s === 400 && r.b.code === 'bad_rating', r);
+    r = await ops(mk('u1', { action: 'rateOrder', orderId: dv.$id, rating: 5, driverRating: 4, comment: 'Muy rico' })); check('v14: califica pedido entregado', r.s === 200 && dv.rating === 5 && dv.driverRating === 4 && dv.ratingComment === 'Muy rico', [r, dv.rating]);
+    r = await ops(mk('u1', { action: 'rateOrder', orderId: dv.$id, rating: 1 })); check('v14: no se califica dos veces (409)', r.s === 409 && r.b.code === 'already_rated' && dv.rating === 5, r);
+    r = await ops(mk('staff1', { action: 'rateOrder', orderId: dv.$id, rating: 1 })); check('v14: el personal no califica (403)', r.s === 403, r);
+  } else check('v14: (no hay pedido entregado de u1 para calificar)', false);
+  const pend = store.orders.find((o) => o.userId === 'u1' && o.status === 'pending');
+  r = await ops(mk('u1', { action: 'rateOrder', orderId: pend.$id, rating: 5 })); check('v14: no se califica un pedido no entregado (409)', r.s === 409 && r.b.code === 'not_delivered', r);
+  const admin14 = (await import('./admin-api/src/main.js')).default;
+  r = await admin14(mk('adm1', { action: 'dashboard' })); check('v14: el dashboard incluye calificaciones y propinas', r.s === 200 && r.b.dashboard.ratings && r.b.dashboard.ratings.count >= 1 && typeof r.b.dashboard.tips === 'number', r.b.dashboard && r.b.dashboard.ratings);
+  for (const k of ['OPEN_HOURS', 'RESTAURANT_UTC_OFFSET', 'PREP_MINUTES', 'COUPONS', 'DELIVERY_FEE_BASE', 'DELIVERY_FEE_PER_KM', 'DELIVERY_FEE_MAX', 'RESTAURANT_LATITUDE', 'RESTAURANT_LONGITUDE', 'DELIVERY_RADIUS_KM', 'TIP_MAX', 'RESTAURANT_CLOSED']) delete process.env[k];
 }
 
 console.log(`\n${ok} ok, ${bad} fallas`); process.exit(bad ? 1 : 0);

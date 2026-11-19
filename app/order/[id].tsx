@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { ActivityIndicator, Alert, ScrollView, Text, TouchableOpacity, View } from "react-native";
+import DeliveryCodeBadge from "@/components/DeliveryCodeBadge";
+import { useEffect, useState } from "react";
+import { ActivityIndicator, Alert, ScrollView, Share, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -9,6 +10,12 @@ import { useOrderTracking } from "@/hooks/useOrderTracking";
 import { cancelMyOrder } from "@/lib/services/orders.service";
 import { confirmReceipt, describeBackendError, reportOrderIssue } from "@/lib/services/staff.service";
 import ReasonModal from "@/components/ReasonModal";
+import RatingForm, { Stars } from "@/components/RatingForm";
+import { rateOrder } from "@/lib/services/ratings.service";
+import { reorderToCart } from "@/lib/services/reorder.service";
+import { getStoreInfo } from "@/lib/services/store.service";
+import { estimateEtaMinutes, formatEta } from "@/lib/domain/eta";
+import { buildReceipt, receiptText } from "@/lib/domain/receipt";
 import { canCustomerCancel, getStatusMeta, isTrackable } from "@/lib/domain/orderStatus";
 import { formatMoney } from "@/lib/domain/pricing";
 import OrderStatusBadge from "@/components/OrderStatusBadge";
@@ -27,10 +34,60 @@ const OrderDetail = () => {
     const [issueOpen, setIssueOpen] = useState(false);
     const [reporting, setReporting] = useState(false);
     const [reported, setReported] = useState(false);
+    const [rating, setRating] = useState<{ rating: number; driverRating: number | null } | null>(null);
+    const [ratingBusy, setRatingBusy] = useState(false);
+    const [reordering, setReordering] = useState(false);
+    const [prepMinutes, setPrepMinutes] = useState<number | null>(null);
+
+    useEffect(() => {
+        let alive = true;
+        getStoreInfo().then((i) => { if (alive && i) setPrepMinutes(i.prepMinutes); });
+        return () => { alive = false; };
+    }, []);
+
+    const handleRate = async (v: { rating: number; driverRating: number | null; comment: string }) => {
+        if (!order || ratingBusy) return;
+        setRatingBusy(true);
+        try {
+            await rateOrder({ orderId: order.id, rating: v.rating, driverRating: v.driverRating, comment: v.comment });
+            setRating({ rating: v.rating, driverRating: v.driverRating });
+        } catch (e: any) {
+            if (e?.code === "already_rated") setRating({ rating: order.rating ?? v.rating, driverRating: order.driverRating });
+            Alert.alert("Calificación", describeBackendError(e));
+        } finally {
+            setRatingBusy(false);
+        }
+    };
+
+    const handleReorder = async () => {
+        if (!order || reordering) return;
+        setReordering(true);
+        try {
+            const { lines, skipped } = await reorderToCart(order);
+            const omitted = skipped.length ? `\n\nNo se agregaron: ${skipped.map((x) => `${x.name} (${x.reason})`).join(", ")}.` : "";
+            if (lines.length === 0) {
+                Alert.alert("Pedir de nuevo", `No se pudo agregar ningún producto.${omitted}`);
+                return;
+            }
+            Alert.alert("Pedir de nuevo", `Agregamos ${lines.length} producto(s) a tu carrito con los precios actuales.${omitted}`, [
+                { text: "Seguir aquí", style: "cancel" },
+                { text: "Ir al carrito", onPress: () => router.push("/cart") }
+            ]);
+        } catch {
+            Alert.alert("Pedir de nuevo", "No pudimos consultar el catálogo. Revisa tu conexión e inténtalo de nuevo.");
+        } finally {
+            setReordering(false);
+        }
+    };
+
+    const handleShareReceipt = async () => {
+        if (!order) return;
+        try { await Share.share({ message: receiptText(order, formatMoney) }); } catch { /* el usuario cerro el menu */ }
+    };
 
     const handleCancel = () => {
         if (!order || cancelling) return;
-        Alert.alert("Cancelar pedido", "¿Seguro que quieres cancelar este pedido?", [
+        Alert.alert("Cancelar pedido", order.paymentMethod === "online" && order.paymentStatus === "paid" ? "¿Seguro que quieres cancelar este pedido? Te devolveremos el pago completo a tu tarjeta (puede tardar unos días en reflejarse)." : "¿Seguro que quieres cancelar este pedido?", [
             { text: "No", style: "cancel" },
             {
                 text: "Sí, cancelar",
@@ -128,6 +185,14 @@ const OrderDetail = () => {
                     <OrderStatusTimeline status={order.rawStatus} />
                 </View>
 
+                {formatEta(estimateEtaMinutes({ status: order.status, prepMinutes })) && (
+                    <Text className="mt-4 text-center paragraph-bold text-dark-100" accessibilityLiveRegion="polite">
+                        {formatEta(estimateEtaMinutes({ status: order.status, prepMinutes }))} <Text className="small-regular text-gray-200">(estimado)</Text>
+                    </Text>
+                )}
+
+                <DeliveryCodeBadge orderId={order.id} status={order.status} />
+
                 {isTrackable(order.status) && (
                     <TouchableOpacity
                         onPress={() => router.push({ pathname: "/order/tracking/[id]", params: { id: order.id } })}
@@ -156,24 +221,21 @@ const OrderDetail = () => {
                         </View>
                     ))}
                     <View className="border-t border-gray-200 pt-3">
-                        {order.subtotal !== null && (
-                            <View className="flex-row justify-between mb-1">
-                                <Text className="text-gray-200">Subtotal</Text>
-                                <Text className="text-dark-100">{formatMoney(order.subtotal)}</Text>
+                        {buildReceipt(order).map((l) => (
+                            <View key={l.label} className={`flex-row justify-between ${l.kind === "total" ? "mt-1" : "mb-1"}`}>
+                                <Text className={l.kind === "total" ? "base-bold text-dark-100" : "text-gray-200"}>{l.label}</Text>
+                                <Text className={l.kind === "total" ? "h3-bold text-primary" : l.kind === "discount" ? "text-green-600" : "text-dark-100"}>
+                                    {l.amount < 0 ? "-" : ""}{formatMoney(Math.abs(l.amount))}
+                                </Text>
                             </View>
-                        )}
-                        <View className="flex-row justify-between mb-1">
-                            <Text className="text-gray-200">Envío</Text>
-                            <Text className="text-dark-100">{formatMoney(order.deliveryFee)}</Text>
-                        </View>
-                        <View className="flex-row justify-between mb-2">
-                            <Text className="text-gray-200">Descuento</Text>
-                            <Text className="text-green-600">-{formatMoney(order.discount)}</Text>
-                        </View>
-                        <View className="flex-row justify-between">
-                            <Text className="base-bold text-dark-100">Total</Text>
-                            <Text className="h3-bold text-primary">{formatMoney(order.total)}</Text>
-                        </View>
+                        ))}
+                        <Text className="small-regular text-gray-200 mt-2">
+                            Pago: {order.paymentMethod === "online" ? "tarjeta en línea" : "efectivo contra entrega"}
+                            {order.paymentStatus === "paid" ? " · pagado" : order.paymentStatus === "refunded" ? " · reembolsado" : ""}
+                        </Text>
+                        <TouchableOpacity onPress={handleShareReceipt} className="mt-3 self-start" accessibilityRole="button" accessibilityLabel="Compartir recibo">
+                            <Text className="paragraph-bold text-primary">Compartir recibo</Text>
+                        </TouchableOpacity>
                     </View>
                 </View>
 
@@ -200,6 +262,25 @@ const OrderDetail = () => {
                             </TouchableOpacity>
                         )}
                     </View>
+                )}
+
+                {order.status === "delivered" && (
+                    <View className="mt-6">
+                        {order.rating !== null || rating ? (
+                            <View className="items-center">
+                                <Text className="paragraph-bold text-dark-100 mb-2">Tu calificación</Text>
+                                <Stars value={(rating?.rating ?? order.rating) as number} size={28} label="Tu calificación" />
+                            </View>
+                        ) : (
+                            <RatingForm hasDriver={!!order.driverName} busy={ratingBusy} onSubmit={handleRate} />
+                        )}
+                    </View>
+                )}
+
+                {(order.status === "delivered" || order.status === "cancelled") && order.items.length > 0 && (
+                    <TouchableOpacity onPress={handleReorder} disabled={reordering} className="mt-4 rounded-full border border-primary py-4" accessibilityRole="button" accessibilityLabel="Pedir de nuevo">
+                        {reordering ? <ActivityIndicator color="#FE8C00" /> : <Text className="text-center paragraph-bold text-primary">Pedir de nuevo</Text>}
+                    </TouchableOpacity>
                 )}
 
                 {(order.status === "on_the_way" || order.status === "delivered" || order.status === "delivery_failed") && (

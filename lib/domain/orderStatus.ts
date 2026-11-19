@@ -129,7 +129,7 @@ export const PROGRESS_STEPS: readonly OrderStatus[] = [
 ];
 
 /** Estados desde los cuales el CLIENTE puede cancelar su propio pedido. */
-export const CUSTOMER_CANCELLABLE: readonly OrderStatus[] = ["pending"];
+export const CUSTOMER_CANCELLABLE: readonly OrderStatus[] = ["pending", "confirmed"];
 
 export function isOrderStatus(value: unknown): value is OrderStatus {
     return (
@@ -162,7 +162,7 @@ export function canTransition(from: unknown, to: unknown): boolean {
     return ALLOWED_TRANSITIONS[a].includes(b);
 }
 
-/** El cliente solo puede cancelar mientras el pedido siga pendiente. */
+/** El cliente cancela solo antes de que se empiece a preparar (pendiente o confirmado). */
 export function canCustomerCancel(value: unknown): boolean {
     const status = parseOrderStatus(value);
     return status !== null && CUSTOMER_CANCELLABLE.includes(status);

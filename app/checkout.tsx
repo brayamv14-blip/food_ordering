@@ -34,6 +34,9 @@ import { computeOrderTotals, unitPrice, formatMoney } from "@/lib/domain/pricing
 import { findUnavailableItems } from "@/lib/services/catalog.service";
 import AddressPicker from "@/components/AddressPicker";
 import { friendlyServerError } from "@/lib/domain/restaurant";
+import { Quote, StoreInfo, getQuote, getStoreInfo } from "@/lib/services/store.service";
+import useStoreSelection from "@/store/store.store";
+import { TIP_PRESETS } from "@/lib/domain/receipt";
 import { PAYMENT_LABELS, PaymentMethod, describeProviderStatus } from "@/lib/domain/payment";
 import {
     isOnlinePaymentEnabled,
@@ -61,6 +64,15 @@ const Checkout = () => {
     const [phone, setPhone] = useState("");
     const [payment, setPayment] = useState<PaymentMethod>("cash_on_delivery");
     const onlineAvailable = isOnlinePaymentEnabled();
+    // Propina, cupon y cotizacion del SERVIDOR (envio por distancia, descuento real). Si falla, se muestra el calculo local.
+    const [tip, setTip] = useState(0);
+    const [couponInput, setCouponInput] = useState("");
+    const [coupon, setCoupon] = useState<string | null>(null);
+    const [couponMsg, setCouponMsg] = useState<string | null>(null);
+    const [quote, setQuote] = useState<Quote | null>(null);
+    const [store, setStore] = useState<StoreInfo | null>(null);
+    // v15: tienda elegida (null si el servidor no tiene multitienda).
+    const selStoreId = useStoreSelection((s) => (s.enabled ? s.storeId : null));
 
     // Un solo identificador por intento: los reintentos lo reutilizan y el
     // servicio devuelve el pedido ya creado en lugar de duplicarlo.
@@ -104,11 +116,53 @@ const Checkout = () => {
         return saved.find((a) => a.label === choice) ?? null;
     };
 
+    useEffect(() => {
+        let alive = true;
+        getStoreInfo(selStoreId).then((i) => { if (alive) setStore(i); });
+        return () => { alive = false; };
+    }, [selStoreId]);
+
+    // Cotizacion del servidor cuando cambia el carrito, la direccion (con coordenadas), la propina o el cupon.
+    const addressForQuote = currentAddress();
+    const quoteKey = JSON.stringify([items.map((i) => [i.id, i.quantity, (i.customizations ?? []).map((c) => c.id)]), addressForQuote?.line, addressForQuote?.latitude, addressForQuote?.longitude, tip, coupon, selStoreId]);
+    useEffect(() => {
+        let alive = true;
+        const a = currentAddress();
+        if (items.length === 0 || !a || typeof a.latitude !== "number" || typeof a.longitude !== "number" || !a.line) { setQuote(null); return; }
+        const t = setTimeout(() => {
+            getQuote({ storeId: selStoreId, items, address: a, couponCode: coupon ?? undefined, tip })
+                .then((q) => { if (alive) { setQuote(q); setStore(q.store); } })
+                .catch((e: any) => {
+                    if (!alive) return;
+                    setQuote(null);
+                    if (coupon && (e?.code === "coupon_invalid" || e?.code === "coupon_min")) { setCouponMsg(e.message); setCoupon(null); }
+                });
+        }, 400);
+        return () => { alive = false; clearTimeout(t); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [quoteKey]);
+
+    const view = quote
+        ? { deliveryFee: quote.deliveryFee, discount: quote.discount, tip: quote.tip, total: quote.total }
+        : { deliveryFee: totals.deliveryFee, discount: totals.discount, tip: tip, total: Math.round((totals.total + tip) * 100) / 100 };
+    const closed = store !== null && !store.open;
+    const tipOptions = TIP_PRESETS.filter((t) => !store || t <= store.tipMax);
+    const applyCoupon = () => {
+        const code = couponInput.trim().toUpperCase();
+        if (!code) { setCoupon(null); setCouponMsg(null); return; }
+        setCouponMsg(null);
+        setCoupon(code);
+    };
+
     const handleConfirmOrder = async () => {
         if (submittingRef.current) return;
 
         if (items.length === 0) {
             Alert.alert("Carrito vacío", "Agrega productos antes de hacer un pedido.");
+            return;
+        }
+        if (closed) {
+            Alert.alert("Restaurante cerrado", store?.hours ? `Horario: ${store.hours}.` : "Vuelve más tarde.");
             return;
         }
 
@@ -146,7 +200,10 @@ const Checkout = () => {
                 address: addressCheck.values,
                 contact: { name: profile.name, phone: normalizePhone(phone) },
                 clientRequestId: requestIdRef.current,
-                paymentMethod: payment
+                paymentMethod: payment,
+                tip,
+                ...(selStoreId ? { storeId: selStoreId } : {}),
+                ...(coupon ? { couponCode: coupon } : {})
             });
 
             // Solo aquí el pedido y sus artículos están guardados.
@@ -342,19 +399,69 @@ const Checkout = () => {
                                 <Text className="paragraph-semibold text-dark-100">{formatMoney(totals.subtotal)}</Text>
                             </View>
                             <View className="flex-row justify-between mb-2">
-                                <Text className="paragraph-regular text-gray-200">Envío</Text>
-                                <Text className="paragraph-semibold text-dark-100">{formatMoney(totals.deliveryFee)}</Text>
+                                <Text className="paragraph-regular text-gray-200">
+                                    Envío{quote?.distanceKm != null ? ` (${quote.distanceKm} km)` : ""}
+                                </Text>
+                                <Text className="paragraph-semibold text-dark-100">{formatMoney(view.deliveryFee)}</Text>
                             </View>
-                            <View className="flex-row justify-between mb-3">
-                                <Text className="paragraph-regular text-gray-200">Descuento</Text>
-                                <Text className="paragraph-semibold text-success">- {formatMoney(totals.discount)}</Text>
+                            <View className="flex-row justify-between mb-2">
+                                <Text className="paragraph-regular text-gray-200">Descuento{coupon && quote?.couponCode ? ` (${quote.couponCode})` : ""}</Text>
+                                <Text className="paragraph-semibold text-success">- {formatMoney(view.discount)}</Text>
                             </View>
+                            {view.tip > 0 && (
+                                <View className="flex-row justify-between mb-2">
+                                    <Text className="paragraph-regular text-gray-200">Propina al repartidor</Text>
+                                    <Text className="paragraph-semibold text-dark-100">{formatMoney(view.tip)}</Text>
+                                </View>
+                            )}
                             <View className="border-t border-gray-200 pt-3 flex-row justify-between">
                                 <Text className="base-bold text-dark-100">Total</Text>
-                                <Text className="h3-bold text-primary">{formatMoney(totals.total)}</Text>
+                                <Text className="h3-bold text-primary">{formatMoney(view.total)}</Text>
                             </View>
+                            {!quote && <Text className="small-regular text-gray-200 mt-2">El envío y el descuento finales los confirma el servidor al hacer el pedido.</Text>}
                         </View>
                     </View>
+                </View>
+
+                {/* Propina y cupón */}
+                <View className="px-5 mt-8">
+                    <Text className="h3-bold text-dark-100 mb-3">Propina para el repartidor</Text>
+                    <View className="flex-row">
+                        {tipOptions.map((t) => (
+                            <TouchableOpacity
+                                key={t}
+                                onPress={() => setTip(t)}
+                                className={`mr-2 rounded-full px-4 py-2 border ${tip === t ? "bg-primary border-primary" : "border-gray-200"}`}
+                                accessibilityRole="button"
+                                accessibilityState={{ selected: tip === t }}
+                                accessibilityLabel={t === 0 ? "Sin propina" : `Propina de ${formatMoney(t)}`}
+                            >
+                                <Text className={tip === t ? "text-white paragraph-bold" : "paragraph-medium text-dark-100"}>{t === 0 ? "Sin propina" : `+$${t}`}</Text>
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+
+                    {(!store || store.couponsEnabled) && (
+                        <>
+                            <Text className="h3-bold text-dark-100 mt-6 mb-3">¿Tienes un cupón?</Text>
+                            <View className="flex-row items-center">
+                                <TextInput
+                                    value={couponInput}
+                                    onChangeText={(v) => setCouponInput(v.toUpperCase())}
+                                    autoCapitalize="characters"
+                                    autoCorrect={false}
+                                    placeholder="CÓDIGO"
+                                    className="flex-1 border border-gray-200 rounded-2xl px-4 py-3 paragraph-regular text-dark-100"
+                                    accessibilityLabel="Código de cupón"
+                                />
+                                <TouchableOpacity onPress={applyCoupon} className="ml-3 rounded-full bg-primary px-5 py-3" accessibilityRole="button" accessibilityLabel="Aplicar cupón">
+                                    <Text className="text-white paragraph-bold">Aplicar</Text>
+                                </TouchableOpacity>
+                            </View>
+                            {couponMsg && <Text className="small-regular text-red-500 mt-2">{couponMsg}</Text>}
+                            {coupon && quote?.couponCode === coupon && <Text className="small-regular text-green-600 mt-2">Cupón {coupon} aplicado.</Text>}
+                        </>
+                    )}
                 </View>
 
                 {/* Pago */}
@@ -385,10 +492,15 @@ const Checkout = () => {
                 </View>
 
                 <View className="px-5 mt-8">
+                    {closed && (
+                        <Text className="mb-3 text-center paragraph-semibold text-red-500" accessibilityLiveRegion="polite">
+                            Restaurante cerrado{store?.hours ? ` · Horario ${store.hours}` : ""}. No puedes hacer pedidos ahora.
+                        </Text>
+                    )}
                     <TouchableOpacity
                         onPress={handleConfirmOrder}
-                        disabled={loading || items.length === 0}
-                        className={`rounded-full py-5 ${loading || items.length === 0 ? "bg-gray-200" : "bg-primary"}`}
+                        disabled={loading || items.length === 0 || closed}
+                        className={`rounded-full py-5 ${loading || items.length === 0 || closed ? "bg-gray-200" : "bg-primary"}`}
                         activeOpacity={0.8}
                         accessibilityRole="button"
                     >
@@ -396,7 +508,7 @@ const Checkout = () => {
                             <ActivityIndicator color="#FFFFFF" />
                         ) : (
                             <Text className="text-white text-center paragraph-bold">
-                                {payment === "online" ? "Pagar y confirmar" : "Confirmar pedido"} - {formatMoney(totals.total)}
+                                {payment === "online" ? "Pagar y confirmar" : "Confirmar pedido"} - {formatMoney(view.total)}
                             </Text>
                         )}
                     </TouchableOpacity>

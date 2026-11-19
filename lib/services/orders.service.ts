@@ -39,6 +39,11 @@ export interface CreateOrderInput {
     /** Identificador de intento: el mismo valor en reintentos evita duplicados. */
     clientRequestId: string;
     paymentMethod?: "cash_on_delivery" | "online";
+    /** Propina al repartidor y cupon: el servidor los valida y recalcula el total. */
+    tip?: number;
+    couponCode?: string;
+    /** v15: tienda elegida (solo con multitienda activa). */
+    storeId?: string | null;
 }
 
 export interface CreateOrderResult {
@@ -109,9 +114,12 @@ export async function createOrderIdempotent(
             appwriteConfig.functions.createOrder,
             {
                 clientRequestId: input.clientRequestId,
+                ...(input.storeId ? { storeId: input.storeId } : {}),
                 address,
                 contact: input.contact,
                 paymentMethod: input.paymentMethod ?? "cash_on_delivery",
+                ...(input.tip && input.tip > 0 ? { tip: input.tip } : {}),
+                ...(input.couponCode ? { couponCode: input.couponCode } : {}),
                 items: input.items.map((i) => ({
                     menuId: i.id,
                     quantity: i.quantity,
